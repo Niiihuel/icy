@@ -1,5 +1,10 @@
+pub mod config;
+pub mod github;
 pub mod links;
 pub mod platform;
 pub mod pty;
 pub mod session;
+pub mod tasks;
+pub mod tiling;
+pub mod updater;
 pub mod vt;

@@ -31,7 +31,7 @@ jobs:
             artifact: icy-windows-x86_64
             bin: icy/target/release/icy.exe
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - name: Checkout icy
         uses: actions/checkout@v4

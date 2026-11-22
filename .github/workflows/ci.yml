@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            kind: unix
+            target: x86_64-unknown-linux-gnu
+            artifact: icy-linux-x86_64
+            bin: icy/target/release/icy
+          - os: windows-2022
+            kind: windows
+            target: x86_64-pc-windows-msvc
+            artifact: icy-windows-x86_64
+            bin: icy/target/release/icy.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout icy
+        uses: actions/checkout@v4
+        with:
+          path: icy
+
+      - name: Read pinned JSNIR commit
+        id: jsnir
+        shell: bash
+        run: |
+          ref=$(tr -d '[:space:]' < icy/jsnir-ref.txt)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout JSNIR
+        uses: actions/checkout@v4
+        with:
+          repository: Niiihuel/jsnir
+          ref: ${{ steps.jsnir.outputs.ref }}
+          path: Jurui
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.99.1"
+          components: clippy,rustfmt
+          targets: ${{ matrix.target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install JSNIR TypeScript compiler
+        working-directory: Jurui
+        run: npm ci
+
+      - name: Resolve native TypeScript compiler (Unix)
+        if: matrix.kind == 'unix'
+        shell: bash
+        run: |
+          tsc="$GITHUB_WORKSPACE/Jurui/node_modules/@typescript/typescript-linux-x64/lib/tsc"
+          if [[ ! -x "$tsc" ]]; then
+            echo "Native tsc not found at $tsc" >&2
+            ls -la "$GITHUB_WORKSPACE/Jurui/node_modules/@typescript"/*/lib || true
+            exit 1
+          fi
+          "$tsc" --version
+          echo "JSNIR_TSC=$tsc" >> "$GITHUB_ENV"
+
+      - name: Resolve native TypeScript compiler (Windows)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $tsc = Join-Path $env:GITHUB_WORKSPACE "Jurui\node_modules\@typescript\typescript-win32-x64\lib\tsc.exe"
+          if (-not (Test-Path -LiteralPath $tsc)) {
+            Write-Error "Native tsc.exe not found at $tsc"
+            Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE "Jurui\node_modules\@typescript\*\lib") -ErrorAction SilentlyContinue
+            exit 1
+          }
+          & $tsc --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "JSNIR_TSC=$tsc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "icy -> target"
+
+      - name: Install Linux graphics libraries
+        if: matrix.kind == 'unix'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libegl-mesa0 libgl1-mesa-dri mesa-vulkan-drivers libxkbcommon0
+
+      - name: Check formatting
+        if: matrix.kind == 'unix'
+        working-directory: icy
+        run: cargo fmt --check
+
+      - name: Run clippy
+        working-directory: icy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        working-directory: icy
+        run: cargo test --workspace --locked
+
+      - name: Build release binary
+        working-directory: icy
+        run: cargo build --release --locked -p icy-app
+
+      - name: Offscreen smoke test (Unix)
+        id: smoke_unix
+        if: matrix.kind == 'unix'
+        continue-on-error: true
+        working-directory: icy
+        run: |
+          ./target/release/icy --offscreen "$RUNNER_TEMP/icy-smoke.ppm"
+          test -s "$RUNNER_TEMP/icy-smoke.ppm"
+
+      - name: Offscreen smoke test (Windows)
+        id: smoke_win
+        if: matrix.kind == 'windows'
+        continue-on-error: true
+        working-directory: icy
+        shell: pwsh
+        run: |
+          $ppm = Join-Path $env:RUNNER_TEMP "icy-smoke.ppm"
+          & .\target\release\icy.exe --offscreen $ppm
+          if (-not (Test-Path -LiteralPath $ppm) -or (Get-Item -LiteralPath $ppm).Length -le 0) {
+            exit 1
+          }
+
+      - name: Upload smoke capture
+        if: steps.smoke_unix.outcome == 'success' || steps.smoke_win.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-smoke
+          path: ${{ runner.temp }}/icy-smoke.ppm
+          if-no-files-found: ignore
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.bin }}
+          if-no-files-found: error

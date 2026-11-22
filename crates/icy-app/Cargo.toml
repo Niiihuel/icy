@@ -12,8 +12,11 @@ path = "src/main.rs"
 icy-core = { path = "../icy-core" }
 jsnir = { path = "../../../Jurui" }
 jsnir-gpu = { path = "../../../Jurui/backends/gpu" }
+resvg = { version = "0.48.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+wgpu = { version = "=30.0.1", default-features = false }
+winit = { version = "=0.30.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "=30.0.1", default-features = false, features = ["dx12"] }

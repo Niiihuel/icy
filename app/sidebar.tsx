@@ -1,133 +1,582 @@
-// Accordee-style workspace sidebar with session list and theme controls.
+// Accordee-faithful sidebar with SVG iconography, Inter typography, session search,
+// theme/accent picker, and bottom CLI usage progress rings with animated tooltips.
+
+const ACCENT_LIST: AccentName[] = [
+  "neutral",
+  "blue",
+  "violet",
+  "rose",
+  "orange",
+  "green",
+  "teal",
+];
+
+function SidebarNavRow(props: {
+  icon?: string;
+  image?: string;
+  label: Source<string>;
+  active?: Source<boolean>;
+  onPress: () => void;
+  right?: Element;
+}): Element {
+  const isActive = () => read(props.active ?? false);
+  return (
+    <Row
+      style={{
+        height: spacing.control,
+        padding: [0, 8, 0, 6],
+        align: "center",
+        justify: "between",
+        gap: 8,
+        shrink: 0,
+      }}
+      onPress={props.onPress}
+      paint={() => ({
+        radius: radii.md,
+        background: isActive() ? palette().sidebarActive : 0,
+        hover: { background: palette().sidebarActive },
+        transitions: [smoothTransition("background", motion.fast)],
+      })}
+    >
+      <Row style={{ align: "center", gap: 8, grow: 1, minWidth: 0 }}>
+        {props.image ? (
+          <Image source={props.image} style={{ width: 16, height: 16, shrink: 0 }} />
+        ) : props.icon ? (
+          <Glyph
+            name={props.icon}
+            size={15}
+            color={() => (isActive() ? palette().textPrimary : palette().textSecondary)}
+          />
+        ) : null}
+        <Text
+          lines={1}
+          font={{
+            family: fontFamilies.sans,
+            size: typeScale.label,
+            weight: fontWeights.normal,
+          }}
+          paint={() => ({
+            color: isActive() ? palette().textPrimary : palette().textSecondary,
+          })}
+        >
+          {props.label}
+        </Text>
+      </Row>
+      {props.right ?? null}
+    </Row>
+  );
+}
+
+function CliUsageRingButton(props: { cli: () => CliUsageItem }): Element {
+  const open = signal(false);
+  let anchorId: number | undefined;
+  let hovering = false;
+  let token = 0;
+
+  return (
+    <Box
+      ref={(id) => {
+        anchorId = id;
+      }}
+      style={{
+        width: 28,
+        height: 28,
+        align: "center",
+        justify: "center",
+        shrink: 0,
+      }}
+      onHover={(inside) => {
+        hovering = inside;
+        const mine = ++token;
+        if (!inside) {
+          open.value = false;
+          return;
+        }
+        after(80, () => {
+          if (hovering && mine === token) open.value = true;
+        });
+      }}
+      paint={() => ({
+        radius: 14,
+        hover: { scale: 1.1 },
+        transitions: [smoothTransition("scale", motion.fast)],
+      })}
+    >
+      <Image
+        source={() => "ring:" + props.cli().id}
+        style={{ width: 28, height: 28 }}
+      />
+
+      {/* Animated Accordee Tooltip */}
+      <Popover
+        open={open}
+        anchor={() => anchorId}
+        side="top"
+        align="center"
+        layer={1000}
+        style={{ width: 184, padding: [10, 11, 10, 11] }}
+        paint={() => ({
+          radius: radii.popover,
+          background: palette().cardBg,
+          edge: palette().border,
+          edgeWidth: spacing.hairline,
+          shadows: [shadows.popover],
+          starting: { opacity: 0, y: 6, scale: 0.94 },
+          transitions: [
+            smoothTransition("opacity", motion.fast),
+            smoothTransition("y", motion.base),
+            smoothTransition("scale", motion.base),
+          ],
+        })}
+      >
+        <Column style={{ gap: 7 }}>
+          <Row style={{ align: "center", justify: "between", gap: 6 }}>
+            <Row style={{ align: "center", gap: 6 }}>
+              <Image
+                source={() => "cli:" + props.cli().id}
+                style={{ width: 14, height: 14, shrink: 0 }}
+              />
+              <Text
+                font={{
+                  family: fontFamilies.sans,
+                  size: typeScale.caption,
+                  weight: fontWeights.medium,
+                }}
+                paint={() => ({ color: palette().textPrimary })}
+              >
+                {() => props.cli().name}
+              </Text>
+            </Row>
+            <Text
+              font={{
+                family: fontFamilies.mono,
+                size: typeScale.tiny,
+                weight: fontWeights.medium,
+              }}
+              paint={() => ({ color: props.cli().colorRgba })}
+            >
+              {() => `${Math.round(props.cli().percent)}%`}
+            </Text>
+          </Row>
+
+          {/* Animated usage bar */}
+          <Box
+            style={{ width: 162, height: 4, clip: true }}
+            paint={() => ({
+              radius: 2,
+              background: palette().kbdBg,
+            })}
+          >
+            <Box
+              style={() => ({
+                width: Math.max(0, Math.round((162 * props.cli().percent) / 100)),
+                height: 4,
+              })}
+              paint={() => ({
+                radius: 2,
+                background: props.cli().colorRgba,
+                transitions: [smoothTransition("width", motion.panel)],
+              })}
+            />
+          </Box>
+
+          <Row style={{ align: "center", justify: "between" }}>
+            <Text
+              font={{ family: fontFamilies.mono, size: typeScale.micro }}
+              paint={() => ({ color: palette().textMuted })}
+            >
+              {() => `in ${props.cli().inputTokens} · out ${props.cli().outputTokens}`}
+            </Text>
+            <Text
+              font={{ family: fontFamilies.sans, size: typeScale.micro }}
+              paint={() => ({ color: palette().textSecondary })}
+            >
+              {() => props.cli().status}
+            </Text>
+          </Row>
+        </Column>
+      </Popover>
+    </Box>
+  );
+}
 
 function Sidebar(): Element {
+  const filteredSessions = () => {
+    const q = searchQuery.value.trim().toLowerCase();
+    const items = sessionsState.value.items;
+    if (!q) return items;
+    return items.filter(
+      (s) =>
+        s.title.toLowerCase().includes(q) ||
+        s.cli.toLowerCase().includes(q) ||
+        s.cwd.toLowerCase().includes(q)
+    );
+  };
+
   return (
-    <Column
-      style={{
-        width: spacing.sidebarWidth,
-        shrink: 0,
-        padding: [10, 10, 12, 10],
-        gap: 10,
-      }}
-      paint={() => ({ background: palette().sidebarBg })}
-    >
-      <Row
-        style={{
-          height: 32,
-          padding: [0, 4, 0, 6],
-          align: "center",
-          justify: "between",
-        }}
-      >
-        <Row style={{ align: "center", gap: 8 }}>
-          <Box
-            style={{ width: 8, height: 8, shrink: 0 }}
-            paint={() => ({ radius: 4, background: accent().brand })}
-          />
-          <Text
-            font={{ family: fontFamilies.sans, size: typeScale.subtitle, weight: fontWeights.semibold }}
-            paint={() => ({ color: palette().textPrimary })}
-          >
-            icy
-          </Text>
-        </Row>
-        <KbdChip
-          label={() => (themeMode.value === "dark" ? "dark" : "light")}
-          onPress={() => {
-            themeMode.value = themeMode.value === "dark" ? "light" : "dark";
+    <Show when={sidebarOpen} style={{ shrink: 0 }}>
+      {() => (
+        <Column
+          style={{
+            width: spacing.sidebarWidth,
+            grow: 1,
+            shrink: 0,
+            padding: [8, 8, 8, 8],
+            gap: 8,
           }}
-        />
-      </Row>
-
-      <SecondaryButton label="+ New session" onPress={createSession} height={spacing.controlLg} />
-
-      <Row style={{ padding: [4, 6, 0, 6], align: "center", justify: "between" }}>
-        <Text
-          font={{ family: fontFamilies.sans, size: typeScale.tiny, weight: fontWeights.medium }}
-          paint={() => ({ color: palette().textMuted })}
+          paint={() => ({ background: palette().sidebarBg })}
         >
-          SESSIONS
-        </Text>
-        <Text
-          font={{ family: fontFamilies.mono, size: typeScale.tiny, weight: fontWeights.normal }}
-          paint={() => ({ color: palette().textMuted })}
-        >
-          {() => String(sessionsState.value.items.length)}
-        </Text>
-      </Row>
+          {/* Accordee Workspace Header */}
+          <Row
+            style={{
+              height: 30,
+              padding: [0, 4, 0, 6],
+              align: "center",
+              justify: "between",
+              shrink: 0,
+            }}
+          >
+            <Row style={{ align: "center", gap: 8 }}>
+              <Image source="brand:icy" style={{ width: 20, height: 20, shrink: 0 }} />
+              <Text
+                font={{
+                  family: fontFamilies.sans,
+                  size: typeScale.label,
+                  weight: fontWeights.semibold,
+                }}
+                paint={() => ({ color: palette().textPrimary })}
+              >
+                icy workspace
+              </Text>
+              <Glyph name="chevrons-up-down" size={13} color={() => palette().textMuted} />
+            </Row>
 
-      <For
-        each={() => sessionsState.value.items}
-        key={(item) => item.id}
-        style={{ grow: 1, minHeight: 0, scroll: true, gap: 2 }}
-      >
-        {(item) => {
-          const isActive = () => sessionsState.value.activeId === item().id;
-          return (
-            <Row
+            <Box
               style={{
-                height: spacing.controlLg,
-                padding: [0, 10, 0, 10],
+                width: 24,
+                height: 24,
                 align: "center",
-                justify: "between",
-                gap: 8,
+                justify: "center",
+                shrink: 0,
               }}
-              onPress={() => selectSession(item().id)}
+              onPress={() => {
+                sidebarOpen.value = false;
+                syncLayout();
+              }}
               paint={() => ({
                 radius: radii.md,
-                background: isActive() ? palette().sidebarActive : 0,
-                hover: { background: isActive() ? palette().sidebarActive : palette().panelBg },
+                hover: { background: palette().sidebarActive },
                 transitions: [smoothTransition("background", motion.fast)],
               })}
             >
-              <Row style={{ align: "center", gap: 8, grow: 1, minWidth: 0 }}>
-                <StatusDot alive={() => item().alive} />
-                <Text
-                  lines={1}
-                  font={{ family: fontFamilies.sans, size: typeScale.label, weight: fontWeights.medium }}
+              <Glyph
+                name="panel-left"
+                size={15}
+                color={() => palette().textMuted}
+                hover={() => palette().textPrimary}
+              />
+            </Box>
+          </Row>
+
+          {/* Accordee Search Bar with ⌘ K */}
+          <Row
+            style={{
+              height: 30,
+              padding: [0, 6, 0, 8],
+              align: "center",
+              gap: 6,
+              shrink: 0,
+            }}
+            paint={() => ({
+              radius: radii.md,
+              background: palette().appBg,
+              edge: palette().border,
+              edgeWidth: spacing.hairline,
+            })}
+          >
+            <Glyph name="search" size={14} color={() => palette().textMuted} />
+            <TextInput
+              style={{ grow: 1, height: 24, padding: [3, 2, 2, 0] }}
+              font={{ family: fontFamilies.sans, size: typeScale.label }}
+              placeholder="Search"
+              placeholderColor={palette().textMuted}
+              onChange={(text) => {
+                searchQuery.value = text;
+              }}
+              paint={() => ({ color: palette().textPrimary })}
+            />
+            <Row style={{ gap: 3, shrink: 0 }}>
+              <KbdKey label="⌘" />
+              <KbdKey label="K" />
+            </Row>
+          </Row>
+
+          {/* Primary Navigation matching Accordee */}
+          <Column style={{ gap: 2, shrink: 0 }}>
+            <SidebarNavRow
+              image="brand:agents"
+              label="Agents"
+              active={() => activeNav.value === "agents"}
+              onPress={() => {
+                activeNav.value = "agents";
+              }}
+              right={
+                <Row style={{ gap: 3 }}>
+                  <KbdKey label="⌘" />
+                  <KbdKey label="Y" />
+                </Row>
+              }
+            />
+            <SidebarNavRow
+              icon="plus"
+              label="New session"
+              onPress={createSession}
+              right={
+                <Row style={{ gap: 3 }}>
+                  <KbdKey label="⌘" />
+                  <KbdKey label="T" />
+                </Row>
+              }
+            />
+            <SidebarNavRow
+              icon="folder"
+              label="Files"
+              active={() => activeNav.value === "files"}
+              onPress={() => {
+                activeNav.value = "files";
+              }}
+              right={<CountPill count={() => String(detectedFilesCount())} />}
+            />
+            <SidebarNavRow
+              icon="tasks"
+              label="Tasks"
+              active={() => activeNav.value === "tasks"}
+              onPress={() => {
+                activeNav.value = "tasks";
+              }}
+              right={<CountPill count="0" />}
+            />
+            <SidebarNavRow
+              icon="dashboard"
+              label="Metrics"
+              active={() => activeNav.value === "metrics"}
+              onPress={() => {
+                activeNav.value = "metrics";
+              }}
+            />
+          </Column>
+
+          {/* Collapsible Section: Your Space (Active Sessions) */}
+          <Row
+            style={{
+              padding: [6, 6, 0, 6],
+              align: "center",
+              justify: "between",
+              shrink: 0,
+            }}
+          >
+            <Row style={{ align: "center", gap: 4 }}>
+              <Text
+                font={{
+                  family: fontFamilies.sans,
+                  size: typeScale.tiny,
+                  weight: fontWeights.normal,
+                }}
+                paint={() => ({ color: palette().textMuted })}
+              >
+                Your Space
+              </Text>
+              <Glyph name="chevron-down" size={11} color={() => palette().textMuted} />
+            </Row>
+            <CountPill count={() => String(sessionsState.value.items.length)} />
+          </Row>
+
+          <For
+            each={filteredSessions}
+            key={(item) => item.id}
+            style={{ grow: 1, minHeight: 0, scroll: true, gap: 2 }}
+          >
+            {(item) => {
+              const isActive = () => sessionsState.value.activeId === item().id;
+              return (
+                <Row
+                  style={{
+                    height: spacing.control,
+                    padding: [0, 8, 0, 6],
+                    align: "center",
+                    justify: "between",
+                    gap: 8,
+                  }}
+                  onPress={() => selectSession(item().id)}
                   paint={() => ({
-                    color: isActive() ? palette().textPrimary : palette().textSecondary,
+                    radius: radii.md,
+                    background: isActive() ? palette().sidebarActive : 0,
+                    hover: { background: palette().sidebarActive },
+                    transitions: [smoothTransition("background", motion.fast)],
                   })}
                 >
-                  {() => item().title}
+                  <Row style={{ align: "center", gap: 8, grow: 1, minWidth: 0 }}>
+                    <Image
+                      source={() => "cli:" + item().cli}
+                      style={{ width: 15, height: 15, shrink: 0 }}
+                    />
+                    <Text
+                      lines={1}
+                      font={{
+                        family: fontFamilies.sans,
+                        size: typeScale.label,
+                        weight: fontWeights.normal,
+                      }}
+                      paint={() => ({
+                        color: isActive() ? palette().textPrimary : palette().textSecondary,
+                      })}
+                    >
+                      {() => item().title}
+                    </Text>
+                  </Row>
+                  <StatusDot alive={() => item().alive} />
+                </Row>
+              );
+            }}
+          </For>
+
+          {/* Accordee Utility Rows (Themes + Settings) */}
+          <Column style={{ gap: 2, shrink: 0 }}>
+            <SidebarNavRow
+              icon="palette"
+              label="Themes"
+              active={themesDrawerOpen}
+              onPress={() => {
+                themesDrawerOpen.value = !themesDrawerOpen.value;
+              }}
+              right={<CountPill count={() => themeMode.value} />}
+            />
+
+            <Show when={themesDrawerOpen}>
+              {() => (
+                <Column
+                  style={{ padding: [8, 8, 8, 8], gap: 8 }}
+                  paint={() => ({
+                    radius: radii.lg,
+                    background: palette().panelBg,
+                    edge: palette().border,
+                    edgeWidth: spacing.hairline,
+                    starting: { opacity: 0, y: 4 },
+                    transitions: [
+                      smoothTransition("opacity", motion.fast),
+                      smoothTransition("y", motion.fast),
+                    ],
+                  })}
+                >
+                  <Row style={{ gap: 6 }}>
+                    <SecondaryButton
+                      label="Dark"
+                      grow={1}
+                      height={24}
+                      onPress={() => {
+                        themeMode.value = "dark";
+                      }}
+                    />
+                    <SecondaryButton
+                      label="Light"
+                      grow={1}
+                      height={24}
+                      onPress={() => {
+                        themeMode.value = "light";
+                      }}
+                    />
+                  </Row>
+                  <Row style={{ align: "center", justify: "between", padding: [0, 2, 0, 2] }}>
+                    {ACCENT_LIST.map((name) => (
+                      <Box
+                        style={{ width: 18, height: 18, shrink: 0 }}
+                        onPress={() => {
+                          themeAccent.value = name;
+                        }}
+                        paint={() => ({
+                          radius: 9,
+                          background:
+                            themeMode.value === "dark"
+                              ? accentsDark[name].brand
+                              : accentsLight[name].brand,
+                          edge:
+                            themeAccent.value === name
+                              ? palette().textPrimary
+                              : palette().border,
+                          edgeWidth: themeAccent.value === name ? 1.5 : 0.5,
+                          hover: { scale: 1.15 },
+                          transitions: [smoothTransition("scale", motion.fast)],
+                        })}
+                      />
+                    ))}
+                  </Row>
+                </Column>
+              )}
+            </Show>
+
+            <SidebarNavRow
+              icon="settings"
+              label="Settings"
+              onPress={() => {
+                themesDrawerOpen.value = !themesDrawerOpen.value;
+              }}
+            />
+          </Column>
+
+          {/* Bottom CLI Usage Progress Rings Dock (Image 1 bottom-left) */}
+          <Column
+            style={{
+              padding: [8, 2, 2, 2],
+              gap: 8,
+              shrink: 0,
+            }}
+            paint={() => ({
+              edge: palette().border,
+              edgeWidth: spacing.hairline,
+              edgeSides: [1, 0, 0, 0],
+            })}
+          >
+            <For
+              each={() => cliUsageState.value}
+              key={(cli) => cli.id}
+              style={{
+                direction: "row",
+                align: "center",
+                justify: "between",
+                padding: [0, 2, 0, 2],
+                height: 30,
+              }}
+            >
+              {(cli) => <CliUsageRingButton cli={cli} />}
+            </For>
+
+            <Row
+              style={{
+                height: 24,
+                padding: [0, 6, 0, 6],
+                align: "center",
+                justify: "between",
+              }}
+            >
+              <Row style={{ align: "center", gap: 7 }}>
+                <Glyph name="archive" size={13} color={() => palette().textMuted} />
+                <Text
+                  font={{ family: fontFamilies.sans, size: typeScale.caption }}
+                  paint={() => ({ color: palette().textMuted })}
+                >
+                  Archived
                 </Text>
               </Row>
               <Text
-                font={{ family: fontFamilies.mono, size: typeScale.micro, weight: fontWeights.normal }}
+                font={{ family: fontFamilies.mono, size: typeScale.tiny }}
                 paint={() => ({ color: palette().textMuted })}
               >
-                {() => (item().alive ? "pty" : "exit")}
+                {() => String(sessionsState.value.archivedCount)}
               </Text>
             </Row>
-          );
-        }}
-      </For>
-
-      <Column
-        style={{
-          padding: [10, 10, 10, 10],
-          gap: 4,
-        }}
-        paint={() => ({
-          radius: radii.lg,
-          background: palette().panelBg,
-          edge: palette().border,
-          edgeWidth: spacing.hairline,
-        })}
-      >
-        <Text
-          font={{ family: fontFamilies.sans, size: typeScale.caption, weight: fontWeights.medium }}
-          paint={() => ({ color: palette().textPrimary })}
-        >
-          Click any path
-        </Text>
-        <Text
-          font={{ family: fontFamilies.sans, size: typeScale.tiny, weight: fontWeights.normal }}
-          paint={() => ({ color: palette().textMuted })}
-        >
-          Files, lines and localhost links in terminal output open directly.
-        </Text>
-      </Column>
-    </Column>
+          </Column>
+        </Column>
+      )}
+    </Show>
   );
 }

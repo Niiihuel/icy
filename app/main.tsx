@@ -1,4 +1,5 @@
-// Root shell combining Accordee's modern frame layout with terminal-first UX.
+// Root shell: Accordee modern frame with sidebar, spring-animated session tab bar,
+// chrome-free PTY terminal viewport, and on-demand file viewer split pane.
 
 onHost(function (message: { view?: string; data?: any }) {
   if (message.view === "sessions") {
@@ -7,8 +8,12 @@ onHost(function (message: { view?: string; data?: any }) {
     screenState.value = message.data;
   } else if (message.view === "viewer") {
     viewerState.value = message.data;
+  } else if (message.view === "cliUsage") {
+    cliUsageState.value = message.data;
   } else if (message.view === "notice") {
     noticeState.value = message.data;
+  } else if (message.view === "viewport" && Array.isArray(message.data)) {
+    viewportSize.value = [Number(message.data[0]), Number(message.data[1])];
   }
 });
 
@@ -22,15 +27,15 @@ function IcyApp(): Element {
     >
       <Sidebar />
 
-      {/* Accordee `html[data-layout=modern] .app-main`: inset main surface */}
-      <Row
-        style={{
+      {/* Accordee `html[data-layout=modern] .app-main`: inset main panel */}
+      <Column
+        style={() => ({
           grow: 1,
           minWidth: 0,
           minHeight: 0,
-          margin: [8, 8, 8, 0],
+          margin: sidebarOpen.value ? [8, 8, 8, 0] : [8, 8, 8, 8],
           clip: true,
-        }}
+        })}
         paint={() => ({
           radius: radii.lg,
           background: palette().appBg,
@@ -39,9 +44,12 @@ function IcyApp(): Element {
           shadows: [shadows.panel],
         })}
       >
-        <TerminalPane />
-        <FileViewer />
-      </Row>
+        <TabBar />
+        <Row style={{ grow: 1, minWidth: 0, minHeight: 0 }}>
+          <TerminalPane />
+          <FileViewer />
+        </Row>
+      </Column>
     </Row>
   );
 }

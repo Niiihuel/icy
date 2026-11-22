@@ -1,5 +1,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod icons;
+mod usage;
+mod view;
+mod window;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -11,9 +16,11 @@ use icy_core::session::{Session, SessionInfo};
 use icy_core::vt::DEFAULT_BG;
 use jsnir::host::Host;
 use jsnir::text::TextEngine;
-use jsnir_gpu::Pusher;
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::usage::CliUsage;
+use crate::window::{Pusher, WindowHooks, WindowShortcut};
 
 const APP: &str = include_str!(concat!(env!("OUT_DIR"), "/app.js"));
 const GEIST_MONO_TTF: &[u8] = include_bytes!("../../../assets/fonts/GeistMono-Regular.ttf");
@@ -21,10 +28,17 @@ const INTER_REGULAR_TTF: &[u8] = include_bytes!("../../../../Jurui/assets/fonts/
 const INTER_SEMIBOLD_TTF: &[u8] =
     include_bytes!("../../../../Jurui/assets/fonts/Inter-SemiBold.ttf");
 
-const DEFAULT_COLS: u16 = 104;
-const DEFAULT_ROWS: u16 = 34;
+const DEFAULT_COLS: u16 = 120;
+const DEFAULT_ROWS: u16 = 38;
 const MAX_VIEWER_LINES: usize = 400;
 const SCREEN_FRAME_MIN_INTERVAL: Duration = Duration::from_millis(16);
+
+// Geist Mono 13px metrics (lineHeight 1.4 -> 18.2px, advance ~7.82px).
+const CELL_WIDTH_PX: f32 = 7.82;
+const CELL_HEIGHT_PX: f32 = 18.2;
+const SIDEBAR_WIDTH_PX: f32 = 220.0;
+const VIEWER_WIDTH_PX: f32 = 460.0;
+const TAB_BAR_HEIGHT_PX: f32 = 42.0;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +86,7 @@ struct ScreenPayload {
 #[serde(rename_all = "camelCase")]
 struct SessionsPayload {
     active_id: u64,
+    archived_count: u32,
     items: Vec<SessionInfo>,
 }
 
@@ -115,14 +130,21 @@ enum BridgeEvent {
     SessionsDirty,
     PushViewer(ViewerPayload),
     PushNotice { kind: String, text: String },
+    ScaleChanged(f32),
 }
 
 struct SessionManager {
     sessions: Vec<Session>,
     active_id: u64,
     next_id: u64,
+    archived_count: u32,
     cols: u16,
     rows: u16,
+    viewport_w: f32,
+    viewport_h: f32,
+    sidebar_open: bool,
+    viewer_open: bool,
+    cwd: PathBuf,
     on_pty_update: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -131,7 +153,7 @@ impl SessionManager {
         let initial = Session::spawn_shell(
             1,
             "shell-1",
-            cwd,
+            cwd.clone(),
             DEFAULT_COLS,
             DEFAULT_ROWS,
             Arc::clone(&on_pty_update),
@@ -141,8 +163,14 @@ impl SessionManager {
             sessions: vec![initial],
             active_id: 1,
             next_id: 2,
+            archived_count: 0,
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
+            viewport_w: 1280.0,
+            viewport_h: 800.0,
+            sidebar_open: true,
+            viewer_open: false,
+            cwd,
             on_pty_update,
         })
     }
@@ -154,14 +182,14 @@ impl SessionManager {
             .or_else(|| self.sessions.first())
     }
 
-    fn create_session(&mut self, cwd: PathBuf) -> Result<u64, String> {
+    fn create_session(&mut self) -> Result<u64, String> {
         let id = self.next_id;
         self.next_id += 1;
         let title = format!("shell-{id}");
         let session = Session::spawn_shell(
             id,
             title,
-            cwd,
+            self.cwd.clone(),
             self.cols,
             self.rows,
             Arc::clone(&self.on_pty_update),
@@ -172,23 +200,88 @@ impl SessionManager {
         Ok(id)
     }
 
+    fn close_session(&mut self, id: u64) -> bool {
+        if self.sessions.len() <= 1 {
+            return false;
+        }
+        let Some(pos) = self.sessions.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        let removed = self.sessions.remove(pos);
+        removed.kill();
+        self.archived_count = self.archived_count.saturating_add(1);
+        if self.active_id == id {
+            let next_idx = pos.min(self.sessions.len() - 1);
+            self.active_id = self.sessions[next_idx].id;
+        }
+        true
+    }
+
+    fn step_tab(&mut self, delta: isize) -> bool {
+        if self.sessions.len() <= 1 {
+            return false;
+        }
+        let cur = self
+            .sessions
+            .iter()
+            .position(|s| s.id == self.active_id)
+            .unwrap_or(0) as isize;
+        let len = self.sessions.len() as isize;
+        let next = (cur + delta).rem_euclid(len) as usize;
+        self.active_id = self.sessions[next].id;
+        true
+    }
+
     fn select_session(&mut self, id: u64) -> bool {
         if self.sessions.iter().any(|s| s.id == id) {
             self.active_id = id;
+            let _ = self.apply_grid_size();
             true
         } else {
             false
         }
     }
 
-    fn resize_active(&mut self, cols: u16, rows: u16) -> Result<(), String> {
-        let cols = cols.clamp(20, 400);
-        let rows = rows.clamp(5, 200);
+    fn update_viewport(&mut self, width: f32, height: f32) -> bool {
+        self.viewport_w = width;
+        self.viewport_h = height;
+        self.recompute_grid_size()
+    }
+
+    fn update_layout(&mut self, sidebar_open: bool, viewer_open: bool) -> bool {
+        self.sidebar_open = sidebar_open;
+        self.viewer_open = viewer_open;
+        self.recompute_grid_size()
+    }
+
+    fn recompute_grid_size(&mut self) -> bool {
+        let sidebar_w = if self.sidebar_open {
+            SIDEBAR_WIDTH_PX
+        } else {
+            0.0
+        };
+        let viewer_w = if self.viewer_open {
+            VIEWER_WIDTH_PX
+        } else {
+            0.0
+        };
+        let avail_w = (self.viewport_w - sidebar_w - viewer_w - 40.0).max(240.0);
+        let avail_h = (self.viewport_h - TAB_BAR_HEIGHT_PX - 36.0).max(160.0);
+        let cols = ((avail_w / CELL_WIDTH_PX).floor() as u16).clamp(40, 280);
+        let rows = ((avail_h / CELL_HEIGHT_PX).floor() as u16).clamp(12, 120);
+        if cols == self.cols && rows == self.rows {
+            return false;
+        }
         self.cols = cols;
         self.rows = rows;
-        if let Some(session) = self.active() {
+        let _ = self.apply_grid_size();
+        true
+    }
+
+    fn apply_grid_size(&self) -> Result<(), String> {
+        for session in &self.sessions {
             session
-                .resize(cols, rows)
+                .resize(self.cols, self.rows)
                 .map_err(|e| format!("resize failed: {e}"))?;
         }
         Ok(())
@@ -197,6 +290,7 @@ impl SessionManager {
     fn sessions_payload(&self) -> SessionsPayload {
         SessionsPayload {
             active_id: self.active_id,
+            archived_count: self.archived_count,
             items: self.sessions.iter().map(Session::info).collect(),
         }
     }
@@ -207,6 +301,32 @@ fn install_fonts(host: &mut Host) {
     host.add_font(INTER_SEMIBOLD_TTF.to_vec());
     host.add_font(GEIST_MONO_TTF.to_vec());
     host.set_default_family("Inter".into());
+}
+
+fn install_images_on_host(host: &mut Host, cli_usage: &[CliUsage], scale: f32) {
+    for (name, rgba, size) in icons::load_static(scale) {
+        host.set_image(name, rgba, size);
+    }
+    for cli in cli_usage {
+        if let Some((name, rgba, size)) =
+            icons::rasterize_cli_ring(&cli.id, &cli.color, cli.percent, scale)
+        {
+            host.set_image(name, rgba, size);
+        }
+    }
+}
+
+fn push_images(pusher: &Pusher, cli_usage: &[CliUsage], scale: f32) {
+    for (name, rgba, size) in icons::load_static(scale) {
+        let _ = pusher.image(name, rgba, size);
+    }
+    for cli in cli_usage {
+        if let Some((name, rgba, size)) =
+            icons::rasterize_cli_ring(&cli.id, &cli.color, cli.percent, scale)
+        {
+            let _ = pusher.image(name, rgba, size);
+        }
+    }
 }
 
 fn build_screen_payload(session: &Session) -> ScreenPayload {
@@ -415,41 +535,6 @@ fn handle_request(
             let _ = tx.send(BridgeEvent::Hello);
             Ok("ok".into())
         }
-        "input" => {
-            let text = payload
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "missing text".to_string())?;
-            let line = format!("{text}\r");
-            let guard = manager.lock().unwrap();
-            if let Some(session) = guard.active() {
-                session
-                    .write(line.as_bytes())
-                    .map_err(|e| format!("pty write failed: {e}"))?;
-            }
-            Ok("ok".into())
-        }
-        "key" => {
-            let key = payload
-                .get("key")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "missing key".to_string())?;
-            let bytes: &[u8] = match key {
-                "ctrl-c" => b"\x03",
-                "esc" => b"\x1b",
-                "tab" => b"\t",
-                "up" => b"\x1b[A",
-                "down" => b"\x1b[B",
-                other => return Err(format!("unsupported key: {other}")),
-            };
-            let guard = manager.lock().unwrap();
-            if let Some(session) = guard.active() {
-                session
-                    .write(bytes)
-                    .map_err(|e| format!("pty write failed: {e}"))?;
-            }
-            Ok("ok".into())
-        }
         "open" => {
             let path = payload
                 .get("path")
@@ -475,7 +560,9 @@ fn handle_request(
                 .and_then(Value::as_u64)
                 .and_then(|v| u32::try_from(v).ok());
             let session_cwd = {
-                let guard = manager.lock().unwrap();
+                let mut guard = manager.lock().unwrap();
+                let sidebar = guard.sidebar_open;
+                guard.update_layout(sidebar, true);
                 guard
                     .active()
                     .map(|s| s.cwd().to_path_buf())
@@ -483,33 +570,51 @@ fn handle_request(
             };
             let viewer = open_file_for_viewer(path, line, col, &session_cwd);
             let _ = tx.send(BridgeEvent::PushViewer(viewer));
+            let _ = tx.send(BridgeEvent::PtyDirty);
             Ok("ok".into())
         }
         "closeViewer" => {
+            {
+                let mut guard = manager.lock().unwrap();
+                let sidebar = guard.sidebar_open;
+                guard.update_layout(sidebar, false);
+            }
             let _ = tx.send(BridgeEvent::PushViewer(ViewerPayload::closed()));
+            let _ = tx.send(BridgeEvent::PtyDirty);
             Ok("ok".into())
         }
-        "resize" => {
-            let cols = payload
-                .get("cols")
-                .and_then(Value::as_u64)
-                .and_then(|v| u16::try_from(v).ok())
-                .unwrap_or(DEFAULT_COLS);
-            let rows = payload
-                .get("rows")
-                .and_then(Value::as_u64)
-                .and_then(|v| u16::try_from(v).ok())
-                .unwrap_or(DEFAULT_ROWS);
-            let mut guard = manager.lock().unwrap();
-            guard.resize_active(cols, rows)?;
-            let _ = tx.send(BridgeEvent::PtyDirty);
+        "layout" => {
+            let sidebar = payload
+                .get("sidebarOpen")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let viewer = payload
+                .get("viewerOpen")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let changed = manager.lock().unwrap().update_layout(sidebar, viewer);
+            if changed {
+                let _ = tx.send(BridgeEvent::PtyDirty);
+            }
             Ok("ok".into())
         }
         "newSession" => {
             let mut guard = manager.lock().unwrap();
-            guard.create_session(cwd.to_path_buf())?;
+            guard.create_session()?;
             let _ = tx.send(BridgeEvent::SessionsDirty);
             let _ = tx.send(BridgeEvent::PtyDirty);
+            Ok("ok".into())
+        }
+        "closeSession" => {
+            let id = payload
+                .get("id")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "missing session id".to_string())?;
+            let mut guard = manager.lock().unwrap();
+            if guard.close_session(id) {
+                let _ = tx.send(BridgeEvent::SessionsDirty);
+                let _ = tx.send(BridgeEvent::PtyDirty);
+            }
             Ok("ok".into())
         }
         "selectSession" => {
@@ -532,24 +637,32 @@ fn run_bridge(
     pusher: Pusher,
     rx: mpsc::Receiver<BridgeEvent>,
     manager: Arc<Mutex<SessionManager>>,
+    cli_usage: Vec<CliUsage>,
 ) {
     let mut last_screen_push = Instant::now() - SCREEN_FRAME_MIN_INTERVAL;
 
     while let Ok(first) = rx.recv() {
         let mut need_sessions = false;
         let mut need_screen = false;
+        let mut need_usage = false;
         let mut pending_viewer: Option<ViewerPayload> = None;
         let mut pending_notice: Option<(String, String)> = None;
+        let mut pending_scale: Option<f32> = None;
 
         let mut apply_event = |ev: BridgeEvent| match ev {
             BridgeEvent::Hello => {
                 need_sessions = true;
                 need_screen = true;
+                need_usage = true;
             }
-            BridgeEvent::PtyDirty => need_screen = true,
+            BridgeEvent::PtyDirty => {
+                need_screen = true;
+                need_sessions = true;
+            }
             BridgeEvent::SessionsDirty => need_sessions = true,
             BridgeEvent::PushViewer(v) => pending_viewer = Some(v),
             BridgeEvent::PushNotice { kind, text } => pending_notice = Some((kind, text)),
+            BridgeEvent::ScaleChanged(scale) => pending_scale = Some(scale),
         };
 
         apply_event(first);
@@ -557,6 +670,12 @@ fn run_bridge(
             apply_event(more);
         }
 
+        if let Some(scale) = pending_scale {
+            push_images(&pusher, &cli_usage, scale);
+        }
+        if need_usage {
+            push_view(&pusher, "cliUsage", &cli_usage);
+        }
         if need_sessions {
             let payload = manager.lock().unwrap().sessions_payload();
             push_view(&pusher, "sessions", &payload);
@@ -590,11 +709,17 @@ fn run_bridge(
     }
 }
 
-fn run_offscreen(path: &Path, manager: &Arc<Mutex<SessionManager>>, mut host: Host) -> ExitCode {
+fn run_offscreen(
+    path: &Path,
+    manager: &Arc<Mutex<SessionManager>>,
+    cli_usage: &[CliUsage],
+    mut host: Host,
+) -> ExitCode {
     std::thread::sleep(Duration::from_millis(250));
 
     let (sessions_payload, screen_payload) = {
-        let guard = manager.lock().unwrap();
+        let mut guard = manager.lock().unwrap();
+        guard.update_viewport(1280.0, 800.0);
         let active = guard.active().expect("initial session");
         let snapshot = active.snapshot();
         let has_output = snapshot
@@ -603,7 +728,7 @@ fn run_offscreen(path: &Path, manager: &Arc<Mutex<SessionManager>>, mut host: Ho
             .any(|row| !row.plain_text().trim().is_empty());
         if !has_output {
             active.feed_local(
-                b"\x1b[1micy\x1b[0m \xc2\xb7 terminal workspace\r\n\
+                b"\x1b[1micy\x1b[0m \xc2\xb7 agent terminal workspace\r\n\
                   \x1b[90m$\x1b[0m cargo test --workspace\r\n\
                   \x1b[32m   Compiling\x1b[0m icy-core v0.1.0\r\n\
                   \x1b[36mnote\x1b[0m: click file link -> crates/icy-core/src/links.rs:36:1\r\n\
@@ -613,6 +738,7 @@ fn run_offscreen(path: &Path, manager: &Arc<Mutex<SessionManager>>, mut host: Ho
         (guard.sessions_payload(), build_screen_payload(active))
     };
 
+    host.push(serde_json::json!({ "view": "cliUsage", "data": cli_usage }).to_string());
     host.push(serde_json::json!({ "view": "sessions", "data": sessions_payload }).to_string());
     host.push(serde_json::json!({ "view": "screen", "data": screen_payload }).to_string());
 
@@ -637,6 +763,7 @@ fn main() -> ExitCode {
     };
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cli_usage = usage::collect_cli_usage();
     let (tx, rx) = mpsc::channel();
 
     let pty_tx = tx.clone();
@@ -669,16 +796,57 @@ fn main() -> ExitCode {
     };
 
     install_fonts(&mut host);
+    install_images_on_host(&mut host, &cli_usage, 1.0);
 
     if let Some(path) = offscreen_path {
-        return run_offscreen(&path, &manager, host);
+        return run_offscreen(&path, &manager, &cli_usage, host);
     }
 
+    let key_manager = Arc::clone(&manager);
+    let shortcut_manager = Arc::clone(&manager);
+    let shortcut_tx = tx.clone();
+    let viewport_manager = Arc::clone(&manager);
+    let viewport_tx = tx.clone();
+
+    let hooks = WindowHooks {
+        on_pty_input: Box::new(move |bytes| {
+            let guard = key_manager.lock().unwrap();
+            if let Some(session) = guard.active() {
+                let _ = session.write(bytes);
+            }
+        }),
+        on_shortcut: Box::new(move |shortcut| {
+            let mut guard = shortcut_manager.lock().unwrap();
+            let changed = match shortcut {
+                WindowShortcut::NewSession => guard.create_session().is_ok(),
+                WindowShortcut::CloseSession => {
+                    let active = guard.active_id;
+                    guard.close_session(active)
+                }
+                WindowShortcut::NextTab => guard.step_tab(1),
+                WindowShortcut::PrevTab => guard.step_tab(-1),
+            };
+            if changed {
+                let _ = shortcut_tx.send(BridgeEvent::SessionsDirty);
+                let _ = shortcut_tx.send(BridgeEvent::PtyDirty);
+            }
+        }),
+        on_viewport: Box::new(move |w, h| {
+            if viewport_manager.lock().unwrap().update_viewport(w, h) {
+                let _ = viewport_tx.send(BridgeEvent::PtyDirty);
+            }
+        }),
+    };
+
     let bridge_manager = Arc::clone(&manager);
-    let result = jsnir_gpu::open_with(host, "icy", [1280, 800], |pusher| {
+    let scale_tx = tx.clone();
+    let result = window::open_with(host, "icy", [1280, 800], hooks, |pusher| {
+        pusher.on_scale(move |scale| {
+            let _ = scale_tx.send(BridgeEvent::ScaleChanged(scale));
+        });
         std::thread::Builder::new()
             .name("icy-ui-bridge".into())
-            .spawn(move || run_bridge(pusher, rx, bridge_manager))
+            .spawn(move || run_bridge(pusher, rx, bridge_manager, cli_usage))
             .expect("spawn ui bridge thread");
     });
 
@@ -703,6 +871,8 @@ mod tests {
             })
             .expect("load compiled TSX bundle");
         install_fonts(&mut host);
+        let usage = usage::collect_cli_usage();
+        install_images_on_host(&mut host, &usage, 1.0);
         host.poll();
         let frame = host.frame(1280., 800., 1., 4096);
         assert!(!frame.items.is_empty(), "expected mounted UI scene items");

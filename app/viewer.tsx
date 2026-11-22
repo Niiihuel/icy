@@ -6,7 +6,7 @@ function FileViewer(): Element {
       {() => (
         <Column
           style={{
-            width: 480,
+            width: 460,
             shrink: 0,
             minHeight: 0,
           }}
@@ -20,9 +20,9 @@ function FileViewer(): Element {
           {/* Viewer header */}
           <Row
             style={{
-              height: spacing.toolbar,
+              height: spacing.tabbar,
               shrink: 0,
-              padding: [0, 12, 0, 14],
+              padding: [0, 10, 0, 14],
               align: "center",
               justify: "between",
               gap: 10,
@@ -36,35 +36,68 @@ function FileViewer(): Element {
             <Row style={{ align: "center", gap: 8, grow: 1, minWidth: 0 }}>
               <Text
                 lines={1}
-                font={{ family: fontFamilies.mono, size: typeScale.caption, weight: fontWeights.medium }}
+                font={{
+                  family: fontFamilies.mono,
+                  size: typeScale.caption,
+                  weight: fontWeights.medium,
+                }}
                 paint={() => ({ color: palette().textPrimary })}
               >
                 {() => viewerState.value.displayPath || viewerState.value.path}
               </Text>
-              <Show when={() => viewerState.value.targetLine !== null && viewerState.value.targetLine !== undefined}>
+              <Show
+                when={() =>
+                  viewerState.value.targetLine !== null &&
+                  viewerState.value.targetLine !== undefined
+                }
+              >
                 {() => (
-                  <KbdChip
-                    accented={true}
-                    label={() => `L${viewerState.value.targetLine ?? 1}`}
-                  />
+                  <CountPill count={() => `L${viewerState.value.targetLine ?? 1}`} />
                 )}
               </Show>
             </Row>
-            <SecondaryButton label="Close" height={26} onPress={closeViewer} />
+            <Box
+              style={{ width: 24, height: 24, align: "center", justify: "center", shrink: 0 }}
+              onPress={closeViewer}
+              paint={() => ({
+                radius: radii.md,
+                hover: { background: palette().sidebarActive },
+                transitions: [smoothTransition("background", motion.fast)],
+              })}
+            >
+              <Glyph
+                name="close"
+                size={13}
+                color={() => palette().textMuted}
+                hover={() => palette().textPrimary}
+              />
+            </Box>
           </Row>
 
           {/* Error state if missing or unreadable */}
-          <Show when={() => viewerState.value.error !== null && viewerState.value.error !== undefined}>
+          <Show
+            when={() =>
+              viewerState.value.error !== null && viewerState.value.error !== undefined
+            }
+          >
             {() => (
               <Column style={{ padding: [16, 16, 16, 16], gap: 6 }}>
                 <Text
-                  font={{ family: fontFamilies.sans, size: typeScale.label, weight: fontWeights.medium }}
+                  font={{
+                    family: fontFamilies.sans,
+                    size: typeScale.label,
+                    weight: fontWeights.medium,
+                  }}
                   paint={() => ({ color: palette().destructive })}
                 >
                   Cannot open file
                 </Text>
                 <Text
-                  font={{ family: fontFamilies.mono, size: typeScale.caption, weight: fontWeights.normal }}
+                  font={{
+                    family: fontFamilies.mono,
+                    size: typeScale.caption,
+                    weight: fontWeights.normal,
+                  }}
                   paint={() => ({ color: palette().textSecondary })}
                 >
                   {() => viewerState.value.error ?? ""}
@@ -88,18 +121,19 @@ function FileViewer(): Element {
             {(line) => (
               <Row
                 style={{
-                  padding: [1, 12, 1, 12],
+                  height: 18.2,
+                  padding: [0, 12, 0, 12],
                   gap: 12,
-                  align: "start",
+                  align: "center",
                 }}
                 paint={() => ({
                   background: line().highlighted ? accent().brandSoft : undefined,
                 })}
               >
                 <Text
-                  style={{ width: 40, shrink: 0 }}
+                  style={{ width: 38, shrink: 0 }}
                   align="end"
-                  font={{ family: fontFamilies.mono, size: typeScale.caption, lineHeight: 18 }}
+                  font={{ family: fontFamilies.mono, size: typeScale.caption, lineHeight: 1.4 }}
                   paint={() => ({
                     color: line().highlighted ? accent().brandText : palette().textMuted,
                   })}
@@ -107,8 +141,9 @@ function FileViewer(): Element {
                   {() => String(line().num)}
                 </Text>
                 <Text
+                  lines={1}
                   style={{ grow: 1, minWidth: 0 }}
-                  font={{ family: fontFamilies.mono, size: 12.5, lineHeight: 18 }}
+                  font={{ family: fontFamilies.mono, size: 12.5, lineHeight: 1.4 }}
                   paint={() => ({ color: palette().textPrimary })}
                 >
                   {() => (line().text.length > 0 ? line().text : " ")}

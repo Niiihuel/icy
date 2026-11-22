@@ -36,13 +36,27 @@ interface ScreenView {
 interface SessionItem {
   id: number;
   title: string;
+  cli: string;
   cwd: string;
   alive: boolean;
 }
 
 interface SessionsView {
   activeId: number;
+  archivedCount: number;
   items: SessionItem[];
+}
+
+interface CliUsageItem {
+  id: string;
+  name: string;
+  color: string;
+  colorRgba: number;
+  percent: number;
+  inputTokens: string;
+  outputTokens: string;
+  sessions: number;
+  status: string;
 }
 
 interface ViewerLine {
@@ -66,10 +80,14 @@ interface NoticeView {
   text: string;
 }
 
-const sessionsState = signal<SessionsView>({ activeId: 1, items: [] });
+const sessionsState = signal<SessionsView>({
+  activeId: 1,
+  archivedCount: 0,
+  items: [],
+});
 const screenState = signal<ScreenView>({
-  cols: 104,
-  rowsCount: 34,
+  cols: 120,
+  rowsCount: 38,
   cursorRow: 0,
   cursorCol: 0,
   cursorVisible: true,
@@ -84,7 +102,13 @@ const viewerState = signal<ViewerView>({
   error: null,
   lines: [],
 });
+const cliUsageState = signal<CliUsageItem[]>([]);
 const noticeState = signal<NoticeView | null>(null);
+const sidebarOpen = signal(true);
+const searchQuery = signal("");
+const themesDrawerOpen = signal(false);
+const activeNav = signal<"agents" | "files" | "tasks" | "metrics">("agents");
+const viewportSize = signal<[number, number]>([1280, 800]);
 
 function requestHost(payload: Record<string, unknown>): void {
   try {
@@ -96,14 +120,6 @@ function requestHost(payload: Record<string, unknown>): void {
 
 function sendHello(): void {
   requestHost({ type: "hello" });
-}
-
-function sendInput(text: string): void {
-  requestHost({ type: "input", text });
-}
-
-function sendKey(key: "ctrl-c" | "esc" | "tab" | "up" | "down"): void {
-  requestHost({ type: "key", key });
 }
 
 function openLink(link: DetectedLink): void {
@@ -124,15 +140,62 @@ function createSession(): void {
   requestHost({ type: "newSession" });
 }
 
+function closeSession(id: number): void {
+  requestHost({ type: "closeSession", id });
+}
+
 function selectSession(id: number): void {
   requestHost({ type: "selectSession", id });
 }
 
-function Show(props: { when: Source<boolean>; children: () => Element }): Element {
+function syncLayout(): void {
+  requestHost({
+    type: "layout",
+    sidebarOpen: sidebarOpen.value,
+    viewerOpen: viewerState.value.open,
+  });
+}
+
+function detectedFilesCount(): number {
+  const seen = new Set<string>();
+  for (const row of screenState.value.rows) {
+    for (const link of row.links) {
+      if (link.kind === "file") {
+        seen.add(link.target);
+      }
+    }
+  }
+  return seen.size;
+}
+
+function Show(props: {
+  when: Source<boolean>;
+  style?: Source<Style>;
+  children: () => Element;
+}): Element {
   return (
-    <Dynamic value={() => read(props.when)}>
+    <Dynamic value={() => read(props.when)} style={props.style}>
       {(visible) => (visible ? props.children() : <Box />)}
     </Dynamic>
+  );
+}
+
+function Glyph(props: {
+  name: Source<string>;
+  size: number;
+  color: Source<number>;
+  hover?: Source<number>;
+}): Element {
+  return (
+    <Image
+      source={() => "glyph:" + read(props.name)}
+      style={{ width: props.size, height: props.size, shrink: 0 }}
+      paint={() => ({
+        color: read(props.color),
+        hover: props.hover ? { color: read(props.hover) } : undefined,
+        transitions: [smoothTransition("color", motion.fast)],
+      })}
+    />
   );
 }
 
@@ -149,37 +212,52 @@ function StatusDot(props: { alive: Source<boolean> }): Element {
   );
 }
 
-function PrimaryButton(props: {
-  label: Source<string>;
-  onPress: () => void;
-  height?: number;
-  disabled?: Source<boolean>;
-}): Element {
+function KbdKey(props: { label: Source<string> }): Element {
   return (
     <Box
       style={{
-        height: props.height ?? spacing.button,
-        padding: [0, 12, 0, 12],
+        width: 16,
+        height: 16,
         align: "center",
         justify: "center",
         shrink: 0,
       }}
-      disabled={props.disabled}
-      onPress={props.onPress}
       paint={() => ({
-        radius: radii.lg,
-        background: accent().brand,
-        opacity: read(props.disabled ?? false) ? 0.5 : 1,
-        hover: { brightness: 0.92 },
-        active: { scale: 0.98 },
-        transitions: [smoothTransition("brightness", motion.fast), smoothTransition("scale", motion.fast)],
+        radius: radii.sm,
+        background: palette().kbdBg,
       })}
     >
       <Text
-        font={{ family: fontFamilies.sans, size: typeScale.label, weight: fontWeights.medium }}
-        paint={() => ({ color: accent().brandFg })}
+        font={{ family: fontFamilies.sans, size: typeScale.micro, weight: fontWeights.medium }}
+        paint={() => ({ color: palette().textMuted })}
       >
         {props.label}
+      </Text>
+    </Box>
+  );
+}
+
+function CountPill(props: { count: Source<string> }): Element {
+  return (
+    <Box
+      style={{
+        height: 16,
+        minWidth: 16,
+        padding: [0, 5, 0, 5],
+        align: "center",
+        justify: "center",
+        shrink: 0,
+      }}
+      paint={() => ({
+        radius: 8,
+        background: palette().kbdBg,
+      })}
+    >
+      <Text
+        font={{ family: fontFamilies.sans, size: typeScale.micro, weight: fontWeights.medium }}
+        paint={() => ({ color: palette().textSecondary })}
+      >
+        {props.count}
       </Text>
     </Box>
   );
@@ -215,45 +293,6 @@ function SecondaryButton(props: {
       <Text
         font={{ family: fontFamilies.sans, size: typeScale.caption, weight: fontWeights.medium }}
         paint={() => ({ color: palette().textPrimary })}
-      >
-        {props.label}
-      </Text>
-    </Box>
-  );
-}
-
-function KbdChip(props: {
-  label: Source<string>;
-  onPress?: () => void;
-  accented?: Source<boolean>;
-}): Element {
-  return (
-    <Box
-      style={{
-        height: 22,
-        padding: [0, 7, 0, 7],
-        align: "center",
-        justify: "center",
-        shrink: 0,
-      }}
-      onPress={props.onPress}
-      paint={() => {
-        const isAccented = read(props.accented ?? false);
-        return {
-          radius: radii.chip,
-          background: isAccented ? accent().brandSoft : palette().kbdBg,
-          edge: isAccented ? accent().ring : palette().border,
-          edgeWidth: spacing.hairline,
-          hover: props.onPress ? { background: palette().sidebarActive } : undefined,
-          transitions: [smoothTransition("background", motion.fast)],
-        };
-      }}
-    >
-      <Text
-        font={{ family: fontFamilies.mono, size: typeScale.tiny, weight: fontWeights.normal }}
-        paint={() => ({
-          color: read(props.accented ?? false) ? accent().brandText : palette().textSecondary,
-        })}
       >
         {props.label}
       </Text>

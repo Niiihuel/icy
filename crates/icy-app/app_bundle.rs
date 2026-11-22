@@ -9,6 +9,7 @@ use std::{
 const APP_FILES: &[&str] = &[
     "app/theme.ts",
     "app/ui.tsx",
+    "app/tabs.tsx",
     "app/sidebar.tsx",
     "app/terminal.tsx",
     "app/viewer.tsx",

@@ -211,9 +211,9 @@ const spacing = {
   button: 30,
   controlLg: 32,
   toolbar: 44,
-  tabbar: 48,
+  tabbar: 42,
   sidebarMenuWidth: 180,
-  sidebarWidth: 232,
+  sidebarWidth: 220,
 };
 
 const radii = {

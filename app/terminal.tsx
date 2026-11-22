@@ -1,58 +1,82 @@
-// Clean, chrome-free terminal viewport. Raw keyboard input goes straight to the active PTY;
+// Clean, chrome-free terminal viewport. Raw keyboard input goes straight to the focused PTY;
 // clicking any underlined file path or localhost URL opens it directly.
 
-function TerminalPane(): Element {
+function TerminalPane(props: {
+  sessionId: () => number;
+  focused: () => boolean;
+  multiPane: () => boolean;
+}): Element {
+  const screen = () =>
+    screensMapState.value[String(props.sessionId())] ?? screenState.value;
+
+  const sessionMeta = () =>
+    sessionsState.value.items.find((s) => s.id === props.sessionId());
+
   return (
-    <Column style={{ grow: 1, minWidth: 0, minHeight: 0 }}>
-      {/* Optional URL preview notice when clicking an http://localhost link */}
-      <Show when={() => noticeState.value !== null}>
+    <Column
+      style={{ grow: 1, minWidth: 0, minHeight: 0, clip: true }}
+      onPress={() => {
+        if (!props.focused()) {
+          selectSession(props.sessionId());
+        }
+      }}
+      paint={() => ({
+        radius: props.multiPane() ? radii.lg : 0,
+        background: palette().appBg,
+        edge: props.multiPane()
+          ? props.focused()
+            ? accent().brand
+            : palette().border
+          : 0,
+        edgeWidth: props.multiPane() ? (props.focused() ? 1 : spacing.hairline) : 0,
+        transitions: [smoothTransition("edge", motion.fast)],
+      })}
+    >
+      {/* Subtle Hyprland/Niri corner pill ONLY when multiple panes are tiled side-by-side */}
+      <Show when={props.multiPane} style={{ shrink: 0 }}>
         {() => (
           <Row
             style={{
-              height: 30,
-              shrink: 0,
-              padding: [0, 12, 0, 14],
+              height: 24,
+              padding: [0, 10, 0, 10],
               align: "center",
               justify: "between",
-              gap: 10,
+              shrink: 0,
             }}
             paint={() => ({
-              background: accent().brandSoft,
+              background: props.focused() ? palette().sidebarActive : palette().panelBg,
               edge: palette().border,
               edgeWidth: spacing.hairline,
               edgeSides: [0, 0, 1, 0],
             })}
           >
-            <Text
-              lines={1}
-              font={{ family: fontFamilies.mono, size: typeScale.caption, weight: fontWeights.normal }}
-              paint={() => ({ color: accent().brandText })}
-            >
-              {() =>
-                noticeState.value
-                  ? `Preview URL (embedded browser in Phase 4): ${noticeState.value.text}`
-                  : ""
-              }
-            </Text>
-            <Box
-              style={{ width: 20, height: 20, align: "center", justify: "center", shrink: 0 }}
-              onPress={() => {
-                noticeState.value = null;
-              }}
-              paint={() => ({
-                radius: radii.sm,
-                hover: { background: palette().kbdBg },
-              })}
-            >
-              <Glyph name="close" size={11} color={() => palette().textSecondary} />
-            </Box>
+            <Row style={{ align: "center", gap: 6 }}>
+              <Image
+                source={() => "cli:" + (sessionMeta()?.cli ?? "terminal")}
+                style={{ width: 12, height: 12, shrink: 0 }}
+              />
+              <Text
+                lines={1}
+                font={{
+                  family: fontFamilies.sans,
+                  size: typeScale.tiny,
+                  weight: fontWeights.medium,
+                }}
+                paint={() => ({
+                  color: props.focused() ? palette().textPrimary : palette().textMuted,
+                })}
+              >
+                {() => sessionMeta()?.title ?? `pane-${props.sessionId()}`}
+              </Text>
+            </Row>
+            <StatusDot alive={() => sessionMeta()?.alive ?? true} />
           </Row>
         )}
       </Show>
 
-      {/* Pure terminal VT grid (Geist Mono 13px, lineHeight multiplier 1.4 = 18.2px) */}
+      {/* Pure terminal VT grid (Geist Mono, lineHeight multiplier 1.4) */}
       <For
-        each={() => screenState.value.rows}
+        each={() => screen().rows}
         key={(row) => row.idx}
         style={{
           grow: 1,
@@ -66,12 +90,15 @@ function TerminalPane(): Element {
           const hasLinks = () => row().links.length > 0;
           return (
             <Box
-              style={{
-                height: 18.2,
+              style={() => ({
+                height: Math.round(terminalFontSize.value * 1.4 * 10) / 10,
                 padding: [0, 2, 0, 2],
                 justify: "center",
-              }}
+              })}
               onPress={() => {
+                if (!props.focused()) {
+                  selectSession(props.sessionId());
+                }
                 const links = row().links;
                 if (links.length > 0) openLink(links[0]);
               }}
@@ -83,7 +110,11 @@ function TerminalPane(): Element {
             >
               <Text
                 lines={1}
-                font={{ family: fontFamilies.mono, size: 13, lineHeight: 1.4 }}
+                font={{
+                  family: fontFamilies.mono,
+                  size: terminalFontSize.value,
+                  lineHeight: 1.4,
+                }}
                 spans={() =>
                   row().spans.map((s) => ({
                     text: s.text,

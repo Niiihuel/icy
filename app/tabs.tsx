@@ -1,4 +1,5 @@
-// Paginated session tab bar with 21st.dev 1113 spring-animated sliding active pill.
+// Paginated session tab bar with left-aligned download progress ring + Accordee install popover,
+// 21st.dev 1113 spring-animated sliding active pill, and Niri/Hyprland tiling controls.
 
 const TABS_PER_PAGE = 5;
 
@@ -35,12 +36,20 @@ function TabBar(): Element {
     }
   }
 
-  // Keep currentPage aligned with activeId and re-measure the spring pill after layout updates.
+  // Keep currentPage aligned with activeId, prune removed tab node ids, and re-measure pill.
   effect(() => {
     const items = sessionsState.value.items;
     const activeId = sessionsState.value.activeId;
     const _vp = viewportSize.value;
     void _vp;
+
+    const validIds = new Set(items.map((item) => item.id));
+    for (const key of Array.from(tabNodes.keys())) {
+      if (!validIds.has(key)) {
+        tabNodes.delete(key);
+      }
+    }
+
     const idx = items.findIndex((item) => item.id === activeId);
     if (idx >= 0) {
       const targetPage = Math.floor(idx / TABS_PER_PAGE);
@@ -71,6 +80,9 @@ function TabBar(): Element {
       })}
     >
       <Row style={{ align: "center", gap: 6, grow: 1, minWidth: 0 }}>
+        {/* Left-side Download Progress Ring Button + Installation Popover */}
+        <HeaderUpdateButton />
+
         {/* Restore sidebar button when collapsed */}
         <Show when={() => !sidebarOpen.value}>
           {() => (
@@ -150,9 +162,6 @@ function TabBar(): Element {
                 <Row
                   ref={(id) => {
                     tabNodes.set(item().id, id);
-                    onCleanup(() => {
-                      tabNodes.delete(item().id);
-                    });
                     after(16, syncPill);
                   }}
                   style={{
@@ -162,7 +171,10 @@ function TabBar(): Element {
                     gap: 7,
                     shrink: 0,
                   }}
-                  onPress={() => selectSession(item().id)}
+                  onPress={() => {
+                    activeNav.value = "agents";
+                    selectSession(item().id);
+                  }}
                   paint={() => ({
                     radius: radii.md,
                     hover: isActive() ? undefined : { background: palette().panelBg },
@@ -175,7 +187,7 @@ function TabBar(): Element {
                   />
                   <Text
                     lines={1}
-                    style={{ maxWidth: 168 }}
+                    style={{ maxWidth: 156 }}
                     font={{
                       family: fontFamilies.sans,
                       size: typeScale.label,
@@ -220,7 +232,7 @@ function TabBar(): Element {
             }}
           </For>
 
-          {/* New session tab button (+) */}
+          {/* New session tab / column button (+) */}
           <Box
             style={{
               width: 28,
@@ -229,7 +241,10 @@ function TabBar(): Element {
               justify: "center",
               shrink: 0,
             }}
-            onPress={createSession}
+            onPress={() => {
+              activeNav.value = "agents";
+              openTiledColumn();
+            }}
             paint={() => ({
               radius: radii.md,
               hover: { background: palette().panelBg },
@@ -250,68 +265,160 @@ function TabBar(): Element {
         </Row>
       </Row>
 
-      {/* Pagination controls (visible cleanly on the right) */}
-      <Row style={{ align: "center", gap: 4, shrink: 0 }}>
-        <Box
-          style={{
-            width: 24,
-            height: 24,
-            align: "center",
-            justify: "center",
-            shrink: 0,
-          }}
-          disabled={() => currentPage.value <= 0}
-          onPress={() => {
-            if (currentPage.value > 0) {
-              const next = currentPage.value - 1;
-              currentPage.value = next;
-              const firstOnPage = sessionsState.value.items[next * TABS_PER_PAGE];
-              if (firstOnPage) selectSession(firstOnPage.id);
-            }
-          }}
+      {/* Right side: Niri / Hyprland quick tiling actions + Tab pagination */}
+      <Row style={{ align: "center", gap: 6, shrink: 0 }}>
+        {/* Tiling actions */}
+        <Row
+          style={{ align: "center", gap: 2, padding: [2, 3, 2, 3], shrink: 0 }}
           paint={() => ({
             radius: radii.md,
-            opacity: currentPage.value <= 0 ? 0.35 : 1,
-            hover: { background: palette().panelBg },
-            transitions: [smoothTransition("background", motion.fast)],
+            background: palette().panelBg,
+            edge: palette().border,
+            edgeWidth: spacing.hairline,
           })}
         >
-          <Glyph name="chevron-left" size={13} color={() => palette().textSecondary} />
-        </Box>
-
-        <Text
-          font={{ family: fontFamilies.mono, size: typeScale.tiny, weight: fontWeights.normal }}
-          paint={() => ({ color: palette().textMuted })}
-        >
-          {() => `${Math.min(currentPage.value + 1, totalPages())} / ${totalPages()}`}
-        </Text>
-
-        <Box
-          style={{
-            width: 24,
-            height: 24,
-            align: "center",
-            justify: "center",
-            shrink: 0,
-          }}
-          disabled={() => currentPage.value + 1 >= totalPages()}
-          onPress={() => {
-            if (currentPage.value + 1 < totalPages()) {
-              const next = currentPage.value + 1;
-              currentPage.value = next;
-              const firstOnPage = sessionsState.value.items[next * TABS_PER_PAGE];
-              if (firstOnPage) selectSession(firstOnPage.id);
+          <Box
+            style={{ height: 22, padding: [0, 6, 0, 6], align: "center", justify: "center" }}
+            onPress={() =>
+              setTilingMode(tilingState.value.mode === "niri" ? "hyprland" : "niri")
             }
-          }}
-          paint={() => ({
-            radius: radii.md,
-            opacity: currentPage.value + 1 >= totalPages() ? 0.35 : 1,
-            hover: { background: palette().panelBg },
-            transitions: [smoothTransition("background", motion.fast)],
-          })}
-        >
-          <Glyph name="chevron-right" size={13} color={() => palette().textSecondary} />
-        </Box>
+            paint={() => ({
+              radius: radii.sm,
+              hover: { background: palette().sidebarActive },
+            })}
+          >
+            <Text
+              font={{
+                family: fontFamilies.mono,
+                size: typeScale.micro,
+                weight: fontWeights.medium,
+              }}
+              paint={() => ({ color: accent().brandText })}
+            >
+              {() => (tilingState.value.mode === "niri" ? "niri" : "hypr")}
+            </Text>
+          </Box>
+
+          <Box
+            style={{ width: 22, height: 22, align: "center", justify: "center" }}
+            onPress={() => {
+              activeNav.value = "agents";
+              openTiledColumn();
+            }}
+            paint={() => ({
+              radius: radii.sm,
+              hover: { background: palette().sidebarActive },
+            })}
+          >
+            <Glyph
+              name="columns"
+              size={13}
+              color={() => palette().textSecondary}
+              hover={() => palette().textPrimary}
+            />
+          </Box>
+
+          <Box
+            style={{ width: 22, height: 22, align: "center", justify: "center" }}
+            onPress={() => {
+              activeNav.value = "agents";
+              stackTiledVertical();
+            }}
+            paint={() => ({
+              radius: radii.sm,
+              hover: { background: palette().sidebarActive },
+            })}
+          >
+            <Glyph
+              name="split"
+              size={13}
+              color={() => palette().textSecondary}
+              hover={() => palette().textPrimary}
+            />
+          </Box>
+
+          <Box
+            style={{ width: 22, height: 22, align: "center", justify: "center" }}
+            onPress={toggleTiledMaximize}
+            paint={() => ({
+              radius: radii.sm,
+              background: tilingState.value.maximized ? palette().sidebarActive : 0,
+              hover: { background: palette().sidebarActive },
+            })}
+          >
+            <Glyph
+              name="maximize"
+              size={12}
+              color={() =>
+                tilingState.value.maximized ? accent().brandText : palette().textSecondary
+              }
+            />
+          </Box>
+        </Row>
+
+        {/* Pagination controls */}
+        <Row style={{ align: "center", gap: 4, shrink: 0 }}>
+          <Box
+            style={{
+              width: 24,
+              height: 24,
+              align: "center",
+              justify: "center",
+              shrink: 0,
+            }}
+            disabled={() => currentPage.value <= 0}
+            onPress={() => {
+              if (currentPage.value > 0) {
+                const next = currentPage.value - 1;
+                currentPage.value = next;
+                const firstOnPage = sessionsState.value.items[next * TABS_PER_PAGE];
+                if (firstOnPage) selectSession(firstOnPage.id);
+              }
+            }}
+            paint={() => ({
+              radius: radii.md,
+              opacity: currentPage.value <= 0 ? 0.35 : 1,
+              hover: { background: palette().panelBg },
+              transitions: [smoothTransition("background", motion.fast)],
+            })}
+          >
+            <Glyph name="chevron-left" size={13} color={() => palette().textSecondary} />
+          </Box>
+
+          <Text
+            font={{ family: fontFamilies.mono, size: typeScale.tiny, weight: fontWeights.normal }}
+            paint={() => ({ color: palette().textMuted })}
+          >
+            {() => `${Math.min(currentPage.value + 1, totalPages())} / ${totalPages()}`}
+          </Text>
+
+          <Box
+            style={{
+              width: 24,
+              height: 24,
+              align: "center",
+              justify: "center",
+              shrink: 0,
+            }}
+            disabled={() => currentPage.value + 1 >= totalPages()}
+            onPress={() => {
+              if (currentPage.value + 1 < totalPages()) {
+                const next = currentPage.value + 1;
+                currentPage.value = next;
+                const firstOnPage = sessionsState.value.items[next * TABS_PER_PAGE];
+                if (firstOnPage) selectSession(firstOnPage.id);
+              }
+            }}
+            paint={() => ({
+              radius: radii.md,
+              opacity: currentPage.value + 1 >= totalPages() ? 0.35 : 1,
+              hover: { background: palette().panelBg },
+              transitions: [smoothTransition("background", motion.fast)],
+            })}
+          >
+            <Glyph name="chevron-right" size={13} color={() => palette().textSecondary} />
+          </Box>
+        </Row>
       </Row>
     </Row>
   );

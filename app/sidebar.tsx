@@ -1,15 +1,5 @@
-// Accordee-faithful sidebar with SVG iconography, Inter typography, session search,
-// theme/accent picker, and bottom CLI usage progress rings with animated tooltips.
-
-const ACCENT_LIST: AccentName[] = [
-  "neutral",
-  "blue",
-  "violet",
-  "rose",
-  "orange",
-  "green",
-  "teal",
-];
+// Accordee-faithful sidebar with top update announcement, animated workspace/GitHub menu,
+// functional sections, official SVGL CLI usage rings with Accordee tooltips, and Archived count.
 
 function SidebarNavRow(props: {
   icon?: string;
@@ -22,14 +12,14 @@ function SidebarNavRow(props: {
   const isActive = () => read(props.active ?? false);
   return (
     <Row
-      style={{
-        height: spacing.control,
+      style={() => ({
+        height: rowControlHeight(),
         padding: [0, 8, 0, 6],
         align: "center",
         justify: "between",
         gap: 8,
         shrink: 0,
-      }}
+      })}
       onPress={props.onPress}
       paint={() => ({
         radius: radii.md,
@@ -85,6 +75,7 @@ function CliUsageRingButton(props: { cli: () => CliUsageItem }): Element {
         justify: "center",
         shrink: 0,
       }}
+      onPress={() => launchCli(props.cli().id)}
       onHover={(inside) => {
         hovering = inside;
         const mine = ++token;
@@ -99,6 +90,7 @@ function CliUsageRingButton(props: { cli: () => CliUsageItem }): Element {
       paint={() => ({
         radius: 14,
         hover: { scale: 1.1 },
+        active: { scale: 0.95 },
         transitions: [smoothTransition("scale", motion.fast)],
       })}
     >
@@ -114,19 +106,14 @@ function CliUsageRingButton(props: { cli: () => CliUsageItem }): Element {
         side="top"
         align="center"
         layer={1000}
-        style={{ width: 184, padding: [10, 11, 10, 11] }}
+        style={{ width: 192, padding: [10, 11, 10, 11] }}
         paint={() => ({
           radius: radii.popover,
           background: palette().cardBg,
           edge: palette().border,
           edgeWidth: spacing.hairline,
           shadows: [shadows.popover],
-          starting: { opacity: 0, y: 6, scale: 0.94 },
-          transitions: [
-            smoothTransition("opacity", motion.fast),
-            smoothTransition("y", motion.base),
-            smoothTransition("scale", motion.base),
-          ],
+          ...accordeeTooltipMotion("top"),
         })}
       >
         <Column style={{ gap: 7 }}>
@@ -161,7 +148,7 @@ function CliUsageRingButton(props: { cli: () => CliUsageItem }): Element {
 
           {/* Animated usage bar */}
           <Box
-            style={{ width: 162, height: 4, clip: true }}
+            style={{ width: 170, height: 4, clip: true }}
             paint={() => ({
               radius: 2,
               background: palette().kbdBg,
@@ -169,7 +156,7 @@ function CliUsageRingButton(props: { cli: () => CliUsageItem }): Element {
           >
             <Box
               style={() => ({
-                width: Math.max(0, Math.round((162 * props.cli().percent) / 100)),
+                width: Math.max(0, Math.round((170 * props.cli().percent) / 100)),
                 height: 4,
               })}
               paint={() => ({
@@ -191,7 +178,7 @@ function CliUsageRingButton(props: { cli: () => CliUsageItem }): Element {
               font={{ family: fontFamilies.sans, size: typeScale.micro }}
               paint={() => ({ color: palette().textSecondary })}
             >
-              {() => props.cli().status}
+              Click to launch
             </Text>
           </Row>
         </Column>
@@ -201,6 +188,9 @@ function CliUsageRingButton(props: { cli: () => CliUsageItem }): Element {
 }
 
 function Sidebar(): Element {
+  const workspaceMenuOpen = signal(false);
+  let workspaceAnchorId: number | undefined;
+
   const filteredSessions = () => {
     const q = searchQuery.value.trim().toLowerCase();
     const items = sessionsState.value.items;
@@ -226,19 +216,43 @@ function Sidebar(): Element {
           }}
           paint={() => ({ background: palette().sidebarBg })}
         >
-          {/* Accordee Workspace Header */}
+          {/* Update Announcement Banner ABOVE the account/workspace header */}
+          <UpdateSidebarBanner />
+
+          {/* Accordee Account / Workspace Header with animated menu */}
           <Row
             style={{
               height: 30,
-              padding: [0, 4, 0, 6],
+              padding: [0, 4, 0, 4],
               align: "center",
               justify: "between",
               shrink: 0,
             }}
           >
-            <Row style={{ align: "center", gap: 8 }}>
+            <Row
+              ref={(id) => {
+                workspaceAnchorId = id;
+              }}
+              style={{
+                height: 28,
+                padding: [0, 6, 0, 4],
+                align: "center",
+                gap: 7,
+                grow: 1,
+                minWidth: 0,
+              }}
+              onPress={() => {
+                workspaceMenuOpen.value = !workspaceMenuOpen.value;
+              }}
+              paint={() => ({
+                radius: radii.md,
+                hover: { background: palette().sidebarActive },
+                transitions: [smoothTransition("background", motion.fast)],
+              })}
+            >
               <Image source="brand:icy" style={{ width: 20, height: 20, shrink: 0 }} />
               <Text
+                lines={1}
                 font={{
                   family: fontFamilies.sans,
                   size: typeScale.label,
@@ -246,9 +260,92 @@ function Sidebar(): Element {
                 }}
                 paint={() => ({ color: palette().textPrimary })}
               >
-                icy workspace
+                {() =>
+                  githubState.value.username
+                    ? `@${githubState.value.username}`
+                    : "icy workspace"
+                }
               </Text>
-              <Glyph name="chevrons-up-down" size={13} color={() => palette().textMuted} />
+              <Glyph name="chevrons-up-down" size={12} color={() => palette().textMuted} />
+
+              {/* Accordee-animated dropdown menu */}
+              <Popover
+                open={workspaceMenuOpen}
+                anchor={() => workspaceAnchorId}
+                side="bottom"
+                align="start"
+                layer={1050}
+                style={{ width: 212, padding: [6, 6, 6, 6] }}
+                paint={() => ({
+                  radius: radii.popover,
+                  background: palette().cardBg,
+                  edge: palette().border,
+                  edgeWidth: spacing.hairline,
+                  shadows: [shadows.popover],
+                  ...accordeeMenuMotion("bottom"),
+                })}
+              >
+                <Column style={{ gap: 4 }}>
+                  <Row
+                    style={{ padding: [6, 8, 6, 8], align: "center", gap: 8 }}
+                    paint={() => ({
+                      radius: radii.md,
+                      background: palette().panelBg,
+                    })}
+                  >
+                    <Image source="cli:github" style={{ width: 16, height: 16, shrink: 0 }} />
+                    <Column style={{ gap: 1, grow: 1, minWidth: 0 }}>
+                      <Text
+                        lines={1}
+                        font={{
+                          family: fontFamilies.sans,
+                          size: typeScale.caption,
+                          weight: fontWeights.medium,
+                        }}
+                        paint={() => ({ color: palette().textPrimary })}
+                      >
+                        {() => githubState.value.repoSlug ?? "Local repository"}
+                      </Text>
+                      <Text
+                        lines={1}
+                        font={{ family: fontFamilies.mono, size: typeScale.micro }}
+                        paint={() => ({ color: palette().textMuted })}
+                      >
+                        {() =>
+                          githubState.value.sshGithubReady
+                            ? `SSH · ${githubState.value.branch ?? "main"}`
+                            : `${githubState.value.method} · ${githubState.value.branch ?? "local"}`
+                        }
+                      </Text>
+                    </Column>
+                  </Row>
+
+                  <SidebarNavRow
+                    icon="sparkles"
+                    label="Release notes"
+                    onPress={() => {
+                      workspaceMenuOpen.value = false;
+                      releaseNotesOpen.value = true;
+                    }}
+                  />
+                  <SidebarNavRow
+                    icon="palette"
+                    label="Custom themes"
+                    onPress={() => {
+                      workspaceMenuOpen.value = false;
+                      activeNav.value = "settings";
+                    }}
+                  />
+                  <SidebarNavRow
+                    icon="refresh"
+                    label="Re-detect GitHub SSH"
+                    onPress={() => {
+                      workspaceMenuOpen.value = false;
+                      refreshGitHub();
+                    }}
+                  />
+                </Column>
+              </Popover>
             </Row>
 
             <Box
@@ -311,7 +408,7 @@ function Sidebar(): Element {
             </Row>
           </Row>
 
-          {/* Primary Navigation matching Accordee */}
+          {/* Primary Navigation — every section is functional */}
           <Column style={{ gap: 2, shrink: 0 }}>
             <SidebarNavRow
               image="brand:agents"
@@ -329,12 +426,15 @@ function Sidebar(): Element {
             />
             <SidebarNavRow
               icon="plus"
-              label="New session"
-              onPress={createSession}
+              label="New column"
+              onPress={() => {
+                activeNav.value = "agents";
+                openTiledColumn();
+              }}
               right={
                 <Row style={{ gap: 3 }}>
                   <KbdKey label="⌘" />
-                  <KbdKey label="T" />
+                  <KbdKey label="N" />
                 </Row>
               }
             />
@@ -344,8 +444,19 @@ function Sidebar(): Element {
               active={() => activeNav.value === "files"}
               onPress={() => {
                 activeNav.value = "files";
+                listFiles(filesState.value.subdir);
               }}
-              right={<CountPill count={() => String(detectedFilesCount())} />}
+              right={
+                <CountPill
+                  count={() =>
+                    String(
+                      detectedFilesCount() > 0
+                        ? detectedFilesCount()
+                        : filesState.value.entries.length
+                    )
+                  }
+                />
+              }
             />
             <SidebarNavRow
               icon="tasks"
@@ -354,7 +465,7 @@ function Sidebar(): Element {
               onPress={() => {
                 activeNav.value = "tasks";
               }}
-              right={<CountPill count="0" />}
+              right={<CountPill count={() => String(openTasksCount())} />}
             />
             <SidebarNavRow
               icon="dashboard"
@@ -397,17 +508,21 @@ function Sidebar(): Element {
             style={{ grow: 1, minHeight: 0, scroll: true, gap: 2 }}
           >
             {(item) => {
-              const isActive = () => sessionsState.value.activeId === item().id;
+              const isActive = () =>
+                activeNav.value === "agents" && sessionsState.value.activeId === item().id;
               return (
                 <Row
-                  style={{
-                    height: spacing.control,
+                  style={() => ({
+                    height: rowControlHeight(),
                     padding: [0, 8, 0, 6],
                     align: "center",
                     justify: "between",
                     gap: 8,
+                  })}
+                  onPress={() => {
+                    activeNav.value = "agents";
+                    selectSession(item().id);
                   }}
-                  onPress={() => selectSession(item().id)}
                   paint={() => ({
                     radius: radii.md,
                     background: isActive() ? palette().sidebarActive : 0,
@@ -440,90 +555,42 @@ function Sidebar(): Element {
             }}
           </For>
 
-          {/* Accordee Utility Rows (Themes + Settings) */}
+          {/* Accordee Utility Rows (GitHub status + Settings) */}
           <Column style={{ gap: 2, shrink: 0 }}>
             <SidebarNavRow
-              icon="palette"
-              label="Themes"
-              active={themesDrawerOpen}
+              image="cli:github"
+              label={() =>
+                githubState.value.branch
+                  ? `${githubState.value.branch}`
+                  : "GitHub SSH"
+              }
               onPress={() => {
-                themesDrawerOpen.value = !themesDrawerOpen.value;
+                activeNav.value = "settings";
               }}
-              right={<CountPill count={() => themeMode.value} />}
+              right={
+                <CountPill
+                  count={() =>
+                    githubState.value.sshGithubReady
+                      ? "SSH"
+                      : githubState.value.connected
+                        ? githubState.value.method
+                        : "off"
+                  }
+                />
+              }
             />
-
-            <Show when={themesDrawerOpen}>
-              {() => (
-                <Column
-                  style={{ padding: [8, 8, 8, 8], gap: 8 }}
-                  paint={() => ({
-                    radius: radii.lg,
-                    background: palette().panelBg,
-                    edge: palette().border,
-                    edgeWidth: spacing.hairline,
-                    starting: { opacity: 0, y: 4 },
-                    transitions: [
-                      smoothTransition("opacity", motion.fast),
-                      smoothTransition("y", motion.fast),
-                    ],
-                  })}
-                >
-                  <Row style={{ gap: 6 }}>
-                    <SecondaryButton
-                      label="Dark"
-                      grow={1}
-                      height={24}
-                      onPress={() => {
-                        themeMode.value = "dark";
-                      }}
-                    />
-                    <SecondaryButton
-                      label="Light"
-                      grow={1}
-                      height={24}
-                      onPress={() => {
-                        themeMode.value = "light";
-                      }}
-                    />
-                  </Row>
-                  <Row style={{ align: "center", justify: "between", padding: [0, 2, 0, 2] }}>
-                    {ACCENT_LIST.map((name) => (
-                      <Box
-                        style={{ width: 18, height: 18, shrink: 0 }}
-                        onPress={() => {
-                          themeAccent.value = name;
-                        }}
-                        paint={() => ({
-                          radius: 9,
-                          background:
-                            themeMode.value === "dark"
-                              ? accentsDark[name].brand
-                              : accentsLight[name].brand,
-                          edge:
-                            themeAccent.value === name
-                              ? palette().textPrimary
-                              : palette().border,
-                          edgeWidth: themeAccent.value === name ? 1.5 : 0.5,
-                          hover: { scale: 1.15 },
-                          transitions: [smoothTransition("scale", motion.fast)],
-                        })}
-                      />
-                    ))}
-                  </Row>
-                </Column>
-              )}
-            </Show>
 
             <SidebarNavRow
               icon="settings"
               label="Settings"
+              active={() => activeNav.value === "settings"}
               onPress={() => {
-                themesDrawerOpen.value = !themesDrawerOpen.value;
+                activeNav.value = "settings";
               }}
             />
           </Column>
 
-          {/* Bottom CLI Usage Progress Rings Dock (Image 1 bottom-left) */}
+          {/* Bottom Official SVGL CLI Usage Progress Rings Dock */}
           <Column
             style={{
               padding: [8, 2, 2, 2],

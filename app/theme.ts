@@ -1,5 +1,5 @@
 // Accordee design tokens mapped to JSNIR primitives. Colors are 0xRRGGBBAA.
-// Source of truth: design/accordee-tokens.css & DESIGN.md.
+// Source of truth: design/accordee-tokens.css, design/reference/accordee/raw/1tyd3ebsyb3wb.css & DESIGN.md.
 
 interface ThemePalette {
   appBg: number;
@@ -19,9 +19,19 @@ interface ThemePalette {
   ring: number;
   statusOnline: number;
   statusIdle: number;
+  backdrop: number;
+  warningBg: number;
+  warningText: number;
+  successBg: number;
+  successText: number;
+  updateBannerBg: number;
+  updateBannerEdge: number;
+  updateBannerAccent: number;
+  mediaGradient: [number, number];
 }
 
 type AccentName = "neutral" | "blue" | "violet" | "rose" | "orange" | "green" | "teal";
+type DensityMode = "comfortable" | "compact";
 
 interface AccentPalette {
   brand: number;
@@ -29,6 +39,29 @@ interface AccentPalette {
   brandText: number;
   brandSoft: number;
   ring: number;
+}
+
+interface CustomThemeColors {
+  appBg: number;
+  sidebarBg: number;
+  sidebarActive: number;
+  panelBg: number;
+  cardBg: number;
+  kbdBg: number;
+  textPrimary: number;
+  textSecondary: number;
+  textMuted: number;
+  border: number;
+  highlight: number;
+}
+
+interface ResolvedThemeItem {
+  id: string;
+  name: string;
+  mode: string;
+  author: string;
+  path: string;
+  colors: CustomThemeColors;
 }
 
 const darkPalette: ThemePalette = {
@@ -49,6 +82,15 @@ const darkPalette: ThemePalette = {
   ring: 0x52525bff,
   statusOnline: 0x4ade80ff,
   statusIdle: 0x71717aff,
+  backdrop: 0x00000099,
+  warningBg: 0xf59e0b1f,
+  warningText: 0xfbbf24ff,
+  successBg: 0x22c55e24,
+  successText: 0x4ade80ff,
+  updateBannerBg: 0x6366f11c,
+  updateBannerEdge: 0x6366f148,
+  updateBannerAccent: 0x818cf8ff,
+  mediaGradient: [0x1e1b4bff, 0x0f172aff],
 };
 
 const lightPalette: ThemePalette = {
@@ -64,11 +106,20 @@ const lightPalette: ThemePalette = {
   sidebarBg: 0xfafafaff,
   sidebarActive: 0xf0f0f1ff,
   sendIdle: 0x8e8e93ff,
-  highlight: 0x3b82f6ff,
+  highlight: 0x2563ebff,
   destructive: 0xef4444ff,
   ring: 0xa1a1aaff,
   statusOnline: 0x16a34aff,
   statusIdle: 0x71717aff,
+  backdrop: 0x09090b66,
+  warningBg: 0xf59e0b22,
+  warningText: 0xb45309ff,
+  successBg: 0x16a34a1f,
+  successText: 0x15803dff,
+  updateBannerBg: 0x6366f114,
+  updateBannerEdge: 0x6366f138,
+  updateBannerAccent: 0x4f46e5ff,
+  mediaGradient: [0x312e81ff, 0x1e293bff],
 };
 
 const accentsDark: Record<AccentName, AccentPalette> = {
@@ -211,9 +262,10 @@ const spacing = {
   button: 30,
   controlLg: 32,
   toolbar: 44,
-  tabbar: 42,
+  tabbar: 44,
   sidebarMenuWidth: 180,
-  sidebarWidth: 220,
+  sidebarWidth: 224,
+  paneGap: 8,
 };
 
 const radii = {
@@ -233,8 +285,8 @@ const shadows = {
   dropSm: { y: 1, blur: 2, spread: 0, color: 0x00000026 } as Shadow,
   panel: { y: 1, blur: 2, spread: 0, color: 0x0000000d } as Shadow,
   card: { y: 2, blur: 6, spread: -2, color: 0x00000014 } as Shadow,
-  popover: { y: 8, blur: 24, spread: -8, color: 0x0000001f } as Shadow,
-  modal: { y: 24, blur: 50, spread: -12, color: 0x00000040 } as Shadow,
+  popover: { y: 8, blur: 24, spread: -8, color: 0x00000038 } as Shadow,
+  modal: { y: 24, blur: 50, spread: -12, color: 0x0000005c } as Shadow,
   dragGhost: { y: 10, blur: 28, spread: -6, color: 0x00000038 } as Shadow,
 };
 
@@ -259,11 +311,108 @@ function smoothTransition(property: Property, duration = motion.base): Transitio
   };
 }
 
+// Exact Accordee Radix/shadcn menu & popover entrance:
+// animate-in fade-in-0 zoom-in-95 slide-in-from-<side>-2 (8px), 200ms --ease-smooth.
+function accordeeMenuMotion(side: "top" | "bottom" | "left" | "right" = "bottom"): {
+  starting: Starting;
+  transitions: Transition[];
+} {
+  const starting: Starting =
+    side === "top"
+      ? { opacity: 0, scale: 0.95, y: 8 }
+      : side === "left"
+        ? { opacity: 0, scale: 0.95, x: 8 }
+        : side === "right"
+          ? { opacity: 0, scale: 0.95, x: -8 }
+          : { opacity: 0, scale: 0.95, y: -8 };
+  return {
+    starting,
+    transitions: [
+      smoothTransition("opacity", motion.base),
+      smoothTransition("scale", motion.base),
+      smoothTransition("x", motion.base),
+      smoothTransition("y", motion.base),
+    ],
+  };
+}
+
+// Exact Accordee dialog/modal entrance:
+// fade-in-0 zoom-in-[0.98] y: 8->0, 300ms (--motion-panel) --ease-smooth.
+function accordeeDialogMotion(): {
+  starting: Starting;
+  transitions: Transition[];
+} {
+  return {
+    starting: { opacity: 0, scale: 0.98, y: 8 },
+    transitions: [
+      smoothTransition("opacity", motion.panel),
+      smoothTransition("scale", motion.panel),
+      smoothTransition("y", motion.panel),
+    ],
+  };
+}
+
+// Exact Accordee tooltip entrance: fade-in-0 zoom-in-95 slide-in 6px, 150ms (--motion-fast).
+function accordeeTooltipMotion(side: "top" | "bottom" = "top"): {
+  starting: Starting;
+  transitions: Transition[];
+} {
+  return {
+    starting: { opacity: 0, scale: 0.95, y: side === "top" ? 6 : -6 },
+    transitions: [
+      smoothTransition("opacity", motion.fast),
+      smoothTransition("scale", motion.fast),
+      smoothTransition("y", motion.fast),
+    ],
+  };
+}
+
+// Accordee panel/card fade-in-up entrance: opacity 0->1, y 6->0, 240ms (--motion-enter).
+function accordeeFadeUpMotion(): {
+  starting: Starting;
+  transitions: Transition[];
+} {
+  return {
+    starting: { opacity: 0, y: 6 },
+    transitions: [
+      smoothTransition("opacity", motion.enter),
+      smoothTransition("y", motion.enter),
+    ],
+  };
+}
+
 const themeMode = signal<"dark" | "light">("dark");
 const themeAccent = signal<AccentName>("blue");
+const activeThemeId = signal<string>("accordee-dark");
+const themesList = signal<ResolvedThemeItem[]>([]);
+const themesDirPath = signal<string>("~/.config/icy/themes");
+const densityMode = signal<DensityMode>("comfortable");
+const terminalFontSize = signal<number>(13);
+
+function rowControlHeight(): number {
+  return densityMode.value === "compact" ? 26 : 30;
+}
 
 function palette(): ThemePalette {
-  return themeMode.value === "dark" ? darkPalette : lightPalette;
+  const base = themeMode.value === "dark" ? darkPalette : lightPalette;
+  const custom = themesList.value.find((t) => t.id === activeThemeId.value);
+  if (!custom) {
+    return base;
+  }
+  return {
+    ...base,
+    appBg: custom.colors.appBg,
+    sidebarBg: custom.colors.sidebarBg,
+    sidebarActive: custom.colors.sidebarActive,
+    panelBg: custom.colors.panelBg,
+    cardBg: custom.colors.cardBg,
+    kbdBg: custom.colors.kbdBg,
+    textPrimary: custom.colors.textPrimary,
+    textSecondary: custom.colors.textSecondary,
+    textMuted: custom.colors.textMuted,
+    border: custom.colors.border,
+    highlight: custom.colors.highlight,
+  };
 }
 
 function accent(): AccentPalette {

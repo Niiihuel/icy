@@ -33,6 +33,13 @@ pub enum WindowShortcut {
     CloseSession,
     NextTab,
     PrevTab,
+    OpenColumn,
+    StackVertical,
+    ToggleMaximize,
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
 }
 
 pub type PtyInputCallback = Box<dyn Fn(&[u8]) + Send>;
@@ -56,6 +63,7 @@ enum Message {
     Font(Vec<u8>),
     #[allow(dead_code)]
     DefaultFamily(String),
+    Quit,
 }
 
 type ScaleCallback = Box<dyn Fn(f32) + Send>;
@@ -110,6 +118,10 @@ impl Pusher {
 
     pub fn image(&self, source: String, rgba: Vec<u8>, size: [u32; 2]) -> bool {
         self.send(Message::Image { source, rgba, size })
+    }
+
+    pub fn quit(&self) -> bool {
+        self.send(Message::Quit)
     }
 
     fn send(&self, message: Message) -> bool {
@@ -382,6 +394,18 @@ impl AppWindow {
                         (self.hooks.on_shortcut)(WindowShortcut::CloseSession);
                         return;
                     }
+                    "n" => {
+                        (self.hooks.on_shortcut)(WindowShortcut::OpenColumn);
+                        return;
+                    }
+                    "d" => {
+                        (self.hooks.on_shortcut)(WindowShortcut::StackVertical);
+                        return;
+                    }
+                    "m" => {
+                        (self.hooks.on_shortcut)(WindowShortcut::ToggleMaximize);
+                        return;
+                    }
                     "v" if !self.host.focused() => {
                         if let Some(text) = self.clipboard.text() {
                             (self.hooks.on_pty_input)(text.as_bytes());
@@ -390,6 +414,28 @@ impl AppWindow {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Niri / Hyprland directional pane focus (Alt+H/J/K/L or Alt+Arrow*) when no TSX input is focused.
+        if !self.host.focused() && self.modifiers.alt_key() && !self.modifiers.control_key() {
+            let dir = match &key.logical_key {
+                Key::Named(NamedKey::ArrowLeft) => Some(WindowShortcut::FocusLeft),
+                Key::Named(NamedKey::ArrowRight) => Some(WindowShortcut::FocusRight),
+                Key::Named(NamedKey::ArrowUp) => Some(WindowShortcut::FocusUp),
+                Key::Named(NamedKey::ArrowDown) => Some(WindowShortcut::FocusDown),
+                Key::Character(c) => match c.to_ascii_lowercase().as_str() {
+                    "h" => Some(WindowShortcut::FocusLeft),
+                    "l" => Some(WindowShortcut::FocusRight),
+                    "k" => Some(WindowShortcut::FocusUp),
+                    "j" => Some(WindowShortcut::FocusDown),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(shortcut) = dir {
+                (self.hooks.on_shortcut)(shortcut);
+                return;
             }
         }
 
@@ -521,13 +567,17 @@ impl ApplicationHandler for AppWindow {
         }
     }
 
-    fn user_event(&mut self, _: &ActiveEventLoop, _: ()) {
+    fn user_event(&mut self, events: &ActiveEventLoop, _: ()) {
         for message in self.inbox.try_iter() {
             match message {
                 Message::Push(text) => self.host.push(text),
                 Message::Image { source, rgba, size } => self.host.set_image(source, rgba, size),
                 Message::Font(bytes) => self.host.add_font(bytes),
                 Message::DefaultFamily(family) => self.host.set_default_family(family),
+                Message::Quit => {
+                    events.exit();
+                    return;
+                }
             }
         }
         self.request_redraw();

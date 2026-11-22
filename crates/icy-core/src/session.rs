@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
@@ -8,20 +8,22 @@ use std::sync::{
 use serde::Serialize;
 
 use crate::platform;
-use crate::pty::PtyHandle;
-use crate::vt::{AlacrittyVt, Screen, VtEngine};
+use crate::pty::{PtyHandle, PtyWriterSlot};
+use crate::vt::{AlacrittyVt, Screen, VtCallbacks, VtEngine};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SessionInfo {
     pub id: u64,
     pub title: String,
+    pub cli: String,
     pub cwd: PathBuf,
     pub alive: bool,
 }
 
 pub struct Session {
     pub id: u64,
-    pub title: String,
+    default_title: String,
+    dynamic_title: Arc<Mutex<Option<String>>>,
     pub cwd: PathBuf,
     vt: Arc<Mutex<Box<dyn VtEngine>>>,
     pty: PtyHandle,
@@ -52,8 +54,36 @@ impl Session {
         rows: u16,
         on_update: Arc<dyn Fn() + Send + Sync>,
     ) -> io::Result<Self> {
-        let vt: Arc<Mutex<Box<dyn VtEngine>>> =
-            Arc::new(Mutex::new(Box::new(AlacrittyVt::new(cols, rows))));
+        let writer_slot: PtyWriterSlot = Arc::new(Mutex::new(None));
+        let dynamic_title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        let reply_slot = Arc::clone(&writer_slot);
+        let title_slot = Arc::clone(&dynamic_title);
+        let title_notify = Arc::clone(&on_update);
+
+        let callbacks = VtCallbacks {
+            on_pty_write: Some(Arc::new(move |bytes: &[u8]| {
+                if let Ok(mut guard) = reply_slot.lock()
+                    && let Some(writer) = guard.as_mut()
+                {
+                    let _ = writer.write_all(bytes);
+                    let _ = writer.flush();
+                }
+            })),
+            on_title: Some(Arc::new(move |next: Option<String>| {
+                if let Ok(mut guard) = title_slot.lock() {
+                    let cleaned = next.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+                    if *guard != cleaned {
+                        *guard = cleaned;
+                        title_notify();
+                    }
+                }
+            })),
+        };
+
+        let vt: Arc<Mutex<Box<dyn VtEngine>>> = Arc::new(Mutex::new(Box::new(
+            AlacrittyVt::with_callbacks(cols, rows, callbacks),
+        )));
         let alive = Arc::new(AtomicBool::new(true));
 
         let vt_feed = Arc::clone(&vt);
@@ -67,6 +97,7 @@ impl Session {
             cols,
             rows,
             Some(&cwd),
+            writer_slot,
             move |bytes| {
                 if let Ok(mut guard) = vt_feed.lock() {
                     guard.feed(bytes);
@@ -81,7 +112,8 @@ impl Session {
 
         Ok(Self {
             id,
-            title: title.into(),
+            default_title: title.into(),
+            dynamic_title,
             cwd,
             vt,
             pty,
@@ -115,10 +147,21 @@ impl Session {
         self.alive.load(Ordering::Acquire)
     }
 
+    pub fn title(&self) -> String {
+        self.dynamic_title
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| self.default_title.clone())
+    }
+
     pub fn info(&self) -> SessionInfo {
+        let title = self.title();
+        let cli = infer_cli_kind(&title);
         SessionInfo {
             id: self.id,
-            title: self.title.clone(),
+            title,
+            cli,
             cwd: self.cwd.clone(),
             alive: self.is_alive(),
         }
@@ -130,6 +173,25 @@ impl Session {
 
     pub fn cwd(&self) -> &Path {
         &self.cwd
+    }
+}
+
+fn infer_cli_kind(title: &str) -> String {
+    let lower = title.to_ascii_lowercase();
+    if lower.contains("claude") {
+        "claude".into()
+    } else if lower.contains("codex") {
+        "codex".into()
+    } else if lower.contains("grok") {
+        "grok".into()
+    } else if lower.contains("junie") {
+        "junie".into()
+    } else if lower.contains("opencode") {
+        "opencode".into()
+    } else if lower.contains("antigravity") {
+        "antigravity".into()
+    } else {
+        "terminal".into()
     }
 }
 
@@ -169,5 +231,28 @@ mod tests {
             );
             let _ = rx.recv_timeout(remaining.min(Duration::from_millis(50)));
         }
+    }
+
+    #[test]
+    fn vt_replies_to_primary_device_attributes_query() {
+        let replies = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink = Arc::clone(&replies);
+        let mut vt = AlacrittyVt::with_callbacks(
+            80,
+            24,
+            VtCallbacks {
+                on_pty_write: Some(Arc::new(move |bytes| {
+                    sink.lock().unwrap().extend_from_slice(bytes);
+                })),
+                on_title: None,
+            },
+        );
+        // Primary Device Attributes (DA1) query sent by fish and other shells at startup.
+        vt.feed(b"\x1b[c");
+        let reply = String::from_utf8_lossy(&replies.lock().unwrap()).to_string();
+        assert!(
+            reply.starts_with("\x1b[?"),
+            "expected DA1 reply, got {reply:?}"
+        );
     }
 }

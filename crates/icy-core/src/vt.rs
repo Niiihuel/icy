@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use alacritty_terminal::{
     Term,
-    event::VoidListener,
+    event::{Event, EventListener},
     grid::Dimensions,
     index::{Column, Line},
     term::{Config as TermConfig, cell::Flags},
@@ -80,8 +82,61 @@ impl Dimensions for GridSize {
     }
 }
 
+pub type PtyWriteCallback = Arc<dyn Fn(&[u8]) + Send + Sync>;
+pub type TitleCallback = Arc<dyn Fn(Option<String>) + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct VtCallbacks {
+    pub on_pty_write: Option<PtyWriteCallback>,
+    pub on_title: Option<TitleCallback>,
+}
+
+struct TermListener {
+    callbacks: VtCallbacks,
+}
+
+impl EventListener for TermListener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::PtyWrite(text) => {
+                if let Some(cb) = &self.callbacks.on_pty_write {
+                    cb(text.as_bytes());
+                }
+            }
+            Event::ColorRequest(index, formatter) => {
+                if let Some(cb) = &self.callbacks.on_pty_write {
+                    let rgba = match index {
+                        256 | 258 => DEFAULT_FG,
+                        257 => DEFAULT_BG,
+                        0..=255 => indexed_color(index as u8),
+                        _ => DEFAULT_FG,
+                    };
+                    let rgb = Rgb {
+                        r: ((rgba >> 24) & 0xff) as u8,
+                        g: ((rgba >> 16) & 0xff) as u8,
+                        b: ((rgba >> 8) & 0xff) as u8,
+                    };
+                    let reply = formatter(rgb);
+                    cb(reply.as_bytes());
+                }
+            }
+            Event::Title(title) => {
+                if let Some(cb) = &self.callbacks.on_title {
+                    cb(Some(title));
+                }
+            }
+            Event::ResetTitle => {
+                if let Some(cb) = &self.callbacks.on_title {
+                    cb(None);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub struct AlacrittyVt {
-    term: Term<VoidListener>,
+    term: Term<TermListener>,
     parser: Processor,
     cols: u16,
     rows: u16,
@@ -89,6 +144,10 @@ pub struct AlacrittyVt {
 
 impl AlacrittyVt {
     pub fn new(cols: u16, rows: u16) -> Self {
+        Self::with_callbacks(cols, rows, VtCallbacks::default())
+    }
+
+    pub fn with_callbacks(cols: u16, rows: u16, callbacks: VtCallbacks) -> Self {
         let cols = cols.max(2);
         let rows = rows.max(1);
         let size = GridSize {
@@ -99,7 +158,7 @@ impl AlacrittyVt {
             scrolling_history: 5000,
             ..TermConfig::default()
         };
-        let term = Term::new(config, &size, VoidListener);
+        let term = Term::new(config, &size, TermListener { callbacks });
         Self {
             term,
             parser: Processor::new(),

@@ -5,20 +5,24 @@ use std::thread::JoinHandle;
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+pub type PtyWriterSlot = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
 pub struct PtyHandle {
     master: Box<dyn MasterPty + Send>,
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    writer: PtyWriterSlot,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     _reader: JoinHandle<()>,
 }
 
 impl PtyHandle {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         program: &str,
         args: &[String],
         cols: u16,
         rows: u16,
         cwd: Option<&Path>,
+        writer_slot: PtyWriterSlot,
         mut on_output: impl FnMut(&[u8]) + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> io::Result<Self> {
@@ -54,6 +58,7 @@ impl PtyHandle {
             .master
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
+        *writer_slot.lock().unwrap() = Some(writer);
 
         let on_exit = Arc::new(Mutex::new(Some(on_exit)));
         let reader_thread = std::thread::Builder::new()
@@ -75,7 +80,7 @@ impl PtyHandle {
 
         Ok(Self {
             master: pair.master,
-            writer: Mutex::new(Some(writer)),
+            writer: writer_slot,
             child: Mutex::new(child),
             _reader: reader_thread,
         })

@@ -1,0 +1,5 @@
+/target/
+/design/reference/
+/node_modules/
+**/*.ppm
+**/*.tmp

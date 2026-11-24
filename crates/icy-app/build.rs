@@ -87,6 +87,14 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
 
     println!("cargo:rerun-if-env-changed=JSNIR_TSC");
+    // libcef.so is loaded from the executable's folder, or from the CEF runtime dir.
+    println!("cargo:rerun-if-env-changed=CEF_PATH");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        if let Some(cef) = env::var_os("CEF_PATH") {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", cef.to_string_lossy());
+        }
+    }
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=app_bundle.rs");
 

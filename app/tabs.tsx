@@ -1,425 +1,218 @@
-// Paginated session tab bar with left-aligned download progress ring + Accordee install popover,
-// 21st.dev 1113 spring-animated sliding active pill, and Niri/Hyprland tiling controls.
+// The active workspace's tabs, overview control, and launcher.
 
-const TABS_PER_PAGE = 5;
+// Accordee ghost button (`Memory`, `Share`, `Start from scratch`): 30px, icon 16 + 13px label.
+function GhostButton(props: {
+  icon: Source<string>;
+  label?: Source<string>;
+  active?: Source<boolean>;
+  tooltip?: string;
+  tooltipDetail?: string;
+  keys?: Source<string[]>;
+  onPress: () => void;
+  trailing?: Element;
+}): Element {
+  const active = () => read(props.active ?? false);
+  const button = (
+    <Row
+      style={{
+        height: spacing.button,
+        padding: props.label !== undefined ? [0, 10, 0, 8] : [0, 7, 0, 7],
+        align: "center",
+        gap: 6,
+        shrink: 0,
+      }}
+      onPress={props.onPress}
+      paint={() => ({
+        radius: radii.md,
+        background: active() ? palette().panelBg : 0,
+        hover: { background: palette().panelBg },
+        active: { scale: controlState.pressScale },
+        transitions: [
+          smoothTransition("background", motion.fast),
+          smoothTransition("scale", motion.fast),
+        ],
+      })}
+    >
+      <Glyph
+        name={props.icon}
+        size={16}
+        color={() => (active() ? palette().textPrimary : palette().textSecondary)}
+        hover={() => palette().textPrimary}
+      />
+      {props.label !== undefined ? (
+        <Text
+          lines={1}
+          font={{ family: fontFamilies.sans, size: typeScale.label }}
+          paint={() => ({ color: active() ? palette().textPrimary : palette().textSubtle })}
+        >
+          {props.label}
+        </Text>
+      ) : null}
+      {props.trailing ?? null}
+    </Row>
+  );
+  return props.tooltip ? (
+    <HintTooltip label={props.tooltip} detail={props.tooltipDetail} keys={props.keys} side="bottom">
+      {button}
+    </HintTooltip>
+  ) : (
+    button
+  );
+}
 
 function TabBar(): Element {
-  const currentPage = signal(0);
-  const pillLeft = signal(0);
-  const pillWidth = signal(0);
-  const tabNodes = new Map<number, number>();
-  let stripNodeId: number | undefined;
-
-  const totalPages = () =>
-    Math.max(1, Math.ceil(sessionsState.value.items.length / TABS_PER_PAGE));
-
-  const visibleTabs = () => {
-    const items = sessionsState.value.items;
-    const page = Math.min(currentPage.value, Math.max(0, totalPages() - 1));
-    const start = page * TABS_PER_PAGE;
-    return items.slice(start, start + TABS_PER_PAGE);
+  const layout = workspaceTabLayout;
+  const outlineWidth = layout.width + layout.overhang * 2;
+  const tabStride = layout.width + layout.stripGap;
+  const tabs = () => overviewOpen2.value ? [] : paneOrder();
+  const contentWidth = () => {
+    const count = tabs().length;
+    return count === 0 ? 0 : (count - 1) * tabStride + outlineWidth;
   };
-
-  function syncPill(): void {
-    const activeId = sessionsState.value.activeId;
-    const tabId = tabNodes.get(activeId);
-    if (stripNodeId === undefined || tabId === undefined) {
-      pillWidth.value = 0;
-      return;
-    }
-    const cols = jsnir.columns;
-    const w = cols.width[tabId] ?? 0;
-    const relX = (cols.x[tabId] ?? 0) - (cols.x[stripNodeId] ?? 0);
-    if (w > 0) {
-      pillLeft.value = relX;
-      pillWidth.value = w;
-    }
-  }
-
-  // Keep currentPage aligned with activeId, prune removed tab node ids, and re-measure pill.
-  effect(() => {
-    const items = sessionsState.value.items;
-    const activeId = sessionsState.value.activeId;
-    const _vp = viewportSize.value;
-    void _vp;
-
-    const validIds = new Set(items.map((item) => item.id));
-    for (const key of Array.from(tabNodes.keys())) {
-      if (!validIds.has(key)) {
-        tabNodes.delete(key);
-      }
-    }
-
-    const idx = items.findIndex((item) => item.id === activeId);
-    if (idx >= 0) {
-      const targetPage = Math.floor(idx / TABS_PER_PAGE);
-      if (currentPage.value !== targetPage) {
-        currentPage.value = targetPage;
-      }
-    }
-    syncPill();
-    after(24, syncPill);
-    after(80, syncPill);
-  });
+  const activeItem = () => {
+    if (activeNav.value !== "agents") return undefined;
+    const index = tabs().indexOf(tilingState.value.focusedSession);
+    if (index < 0) return undefined;
+    // Scroll the entire outline into view, not just the tab's contents.
+    const start = index * tabStride;
+    return { start, end: start + outlineWidth };
+  };
 
   return (
     <Row
       style={{
-        height: spacing.tabbar,
+        height: spacing.headerHeight,
         shrink: 0,
-        padding: [6, 10, 6, 10],
+        padding: [0, layout.gap + layout.stroke, 0, layout.gap + layout.stroke],
         align: "center",
-        justify: "between",
-        gap: 8,
+        gap: spacing.unit,
+        // Paint above the workspace frame's top stroke so the active tab erases its span.
+        layer: 1,
       }}
-      paint={() => ({
-        background: palette().appBg,
-        edge: palette().border,
-        edgeWidth: spacing.hairline,
-        edgeSides: [0, 0, 1, 0],
-      })}
     >
-      <Row style={{ align: "center", gap: 6, grow: 1, minWidth: 0 }}>
-        {/* Left-side Download Progress Ring Button + Installation Popover */}
-        <HeaderUpdateButton />
-
-        {/* Restore sidebar button when collapsed */}
-        <Show when={() => !sidebarOpen.value}>
-          {() => (
-            <Box
-              style={{
-                width: 28,
-                height: 28,
-                align: "center",
-                justify: "center",
-                shrink: 0,
-              }}
-              onPress={() => {
-                sidebarOpen.value = true;
-                syncLayout();
-              }}
-              paint={() => ({
-                radius: radii.md,
-                hover: { background: palette().panelBg },
-                transitions: [smoothTransition("background", motion.fast)],
-              })}
-            >
-              <Glyph
-                name="panel-left"
-                size={15}
-                color={() => palette().textMuted}
-                hover={() => palette().textPrimary}
-              />
-            </Box>
-          )}
-        </Show>
-
-        {/* Spring-animated tab strip (21st.dev 1113 layoutId="bubble" adaptation) */}
-        <Row
-          ref={(id) => {
-            stripNodeId = id;
-            after(24, syncPill);
-          }}
-          style={{
-            height: 30,
-            align: "center",
-            gap: 4,
-            grow: 1,
-            minWidth: 0,
-          }}
-        >
-          {/* Animated spring background bubble */}
-          <Box
-            style={() => ({
-              position: "absolute",
-              left: pillLeft.value,
-              top: 0,
-              width: pillWidth.value,
-              height: 30,
-            })}
-            paint={() => ({
-              radius: radii.md,
-              background: palette().sidebarActive,
-              edge: palette().border,
-              edgeWidth: spacing.hairline,
-              opacity: pillWidth.value > 0 ? 1 : 0,
-              transitions: [
-                { property: "left", duration: 520, easing: "spring" },
-                { property: "width", duration: 520, easing: "spring" },
-                smoothTransition("opacity", motion.fast),
-              ],
-            })}
-          />
-
-          <For
-            each={visibleTabs}
-            key={(item) => item.id}
-            style={{ direction: "row", align: "center", gap: 4, height: 30 }}
-          >
-            {(item) => {
-              const isActive = () => sessionsState.value.activeId === item().id;
-              return (
-                <Row
-                  ref={(id) => {
-                    tabNodes.set(item().id, id);
-                    after(16, syncPill);
-                  }}
-                  style={{
-                    height: 30,
-                    padding: [0, 10, 0, 10],
-                    align: "center",
-                    gap: 7,
-                    shrink: 0,
-                  }}
-                  onPress={() => {
-                    activeNav.value = "agents";
-                    selectSession(item().id);
-                  }}
-                  paint={() => ({
-                    radius: radii.md,
-                    hover: isActive() ? undefined : { background: palette().panelBg },
-                    transitions: [smoothTransition("background", motion.fast)],
-                  })}
-                >
-                  <Image
-                    source={() => "cli:" + item().cli}
-                    style={{ width: 14, height: 14, shrink: 0 }}
-                  />
-                  <Text
-                    lines={1}
-                    style={{ maxWidth: 156 }}
-                    font={{
-                      family: fontFamilies.sans,
-                      size: typeScale.label,
-                      weight: fontWeights.medium,
-                    }}
-                    paint={() => ({
-                      color: isActive() ? palette().textPrimary : palette().textSecondary,
-                      hover: { color: palette().textPrimary },
-                      transitions: [smoothTransition("color", motion.fast)],
-                    })}
-                  >
-                    {() => item().title}
-                  </Text>
-                  <Show when={() => sessionsState.value.items.length > 1}>
-                    {() => (
-                      <Box
-                        style={{
-                          width: 16,
-                          height: 16,
-                          align: "center",
-                          justify: "center",
-                          shrink: 0,
-                        }}
-                        onPress={() => closeSession(item().id)}
-                        paint={() => ({
-                          radius: radii.sm,
-                          hover: { background: palette().kbdBg },
-                          transitions: [smoothTransition("background", motion.fast)],
-                        })}
-                      >
-                        <Glyph
-                          name="close"
-                          size={10}
-                          color={() => palette().textMuted}
-                          hover={() => palette().textPrimary}
-                        />
-                      </Box>
-                    )}
-                  </Show>
-                </Row>
-              );
-            }}
-          </For>
-
-          {/* New session tab / column button (+) */}
-          <Box
-            style={{
-              width: 28,
-              height: 28,
-              align: "center",
-              justify: "center",
-              shrink: 0,
-            }}
-            onPress={() => {
-              activeNav.value = "agents";
-              openTiledColumn();
-            }}
-            paint={() => ({
-              radius: radii.md,
-              hover: { background: palette().panelBg },
-              active: { scale: 0.94 },
-              transitions: [
-                smoothTransition("background", motion.fast),
-                smoothTransition("scale", motion.fast),
-              ],
-            })}
-          >
-            <Glyph
-              name="plus"
-              size={14}
-              color={() => palette().textMuted}
-              hover={() => palette().textPrimary}
-            />
-          </Box>
-        </Row>
-      </Row>
-
-      {/* Right side: Niri / Hyprland quick tiling actions + Tab pagination */}
-      <Row style={{ align: "center", gap: 6, shrink: 0 }}>
-        {/* Tiling actions */}
-        <Row
-          style={{ align: "center", gap: 2, padding: [2, 3, 2, 3], shrink: 0 }}
+      {/* Niri workspaces: the active one's number; opens (or closes) the overview. */}
+      <GhostButton icon="workspaces" label={() => String(tilingState.value.activeWorkspace + 1)}
+        tooltip="Workspaces" keys={() => keysFor("view.overview")} active={() => overviewOpen2.value}
+        onPress={toggleOverviewMode} />
+      <HorizontalStrip
+        contentWidth={contentWidth}
+        label="tabs"
+        height={spacing.headerHeight}
+        activeItem={activeItem}
+      >
+        {/* Replace this span of the divider with a single stroke that starts and ends
+            on the divider, so the curves never overlap it or the tab sides. */}
+        <Box
+          style={() => ({
+            position: "absolute", left: activeItem()?.start ?? 0, top: spacing.headerHeight - layout.height,
+            width: outlineWidth, height: layout.height,
+          })}
           paint={() => ({
-            radius: radii.md,
-            background: palette().panelBg,
-            edge: palette().border,
-            edgeWidth: spacing.hairline,
+            opacity: activeItem() ? 1 : 0,
+            transitions: [springTransition("left"), smoothTransition("opacity", motion.fast)],
           })}
         >
-          <Box
-            style={{ height: 22, padding: [0, 6, 0, 6], align: "center", justify: "center" }}
-            onPress={() =>
-              setTilingMode(tilingState.value.mode === "niri" ? "hyprland" : "niri")
-            }
-            paint={() => ({
-              radius: radii.sm,
-              hover: { background: palette().sidebarActive },
-            })}
-          >
-            <Text
-              font={{
-                family: fontFamilies.mono,
-                size: typeScale.micro,
-                weight: fontWeights.medium,
-              }}
-              paint={() => ({ color: accent().brandText })}
-            >
-              {() => (tilingState.value.mode === "niri" ? "niri" : "hypr")}
-            </Text>
+          <Image source="glyph:workspace-tab-fill" style={{ width: outlineWidth, height: layout.height }}
+            paint={() => ({ color: palette().appBg })} />
+          <Box style={{ position: "absolute", left: 0, top: layout.height - layout.stroke, width: outlineWidth, height: layout.stroke }}
+            paint={() => ({ background: palette().appBg })} />
+          <Box style={{ position: "absolute", left: 0, top: 0, width: outlineWidth, height: layout.height }}>
+            <Image source="glyph:workspace-tab-outline" style={{ width: outlineWidth, height: layout.height }}
+              paint={() => ({ color: palette().border })} />
           </Box>
+        </Box>
+        {/* Tabs follow the active workspace's tiling order. */}
+        <For
+          each={tabs}
+          key={(id) => id}
+          style={() => ({ direction: "row", align: "end", gap: workspaceTabLayout.stripGap, height: spacing.headerHeight,
+            padding: tabs().length > 0 ? [0, 0, 0, layout.overhang] : 0 })}
+        >
+          {(tabId) => {
+            const id = tabId();
+            const session = () => sessionsState.value.items.find((s) => s.id === id);
+            const tile = () => tileOf(id);
+            const isActive = () => activeNav.value === "agents" && tilingState.value.focusedSession === id;
+            const hovered = signal(false);
+            return (
+              <Row
+                style={{ width: workspaceTabLayout.width, height: workspaceTabLayout.height,
+                  padding: [0, spacing.unit * 1.5, 0, workspaceTabLayout.gap * 1.5],
+                  align: "center", gap: workspaceTabLayout.gap, shrink: 0 }}
+                onHover={(inside) => {
+                  hovered.value = inside;
+                }}
+                onPress={() => focusTile(id)}
+                onDrag={windowDragHandler(() => id)}
+              >
+                {/* Inactive hover: a floating pill inside the tab, not the connected shape. */}
+                <Box style={{ position: "absolute", left: spacing.unit / 2, top: spacing.unit,
+                  width: workspaceTabLayout.width - spacing.unit, height: spacing.button }}
+                  paint={() => ({
+                    radius: radii.md,
+                    background: hovered.value && !isActive() ? palette().sidebarActive : 0,
+                    transitions: [smoothTransition("background", motion.fast)],
+                  })} />
+                <Dynamic value={() => (tile() ? tileGlyph(tile() as TileSpec) : "")} style={{ shrink: 0 }}>
+                  {(glyph) =>
+                    glyph ? (
+                      <Glyph name={glyph} size={workspaceTabLayout.icon}
+                        color={() => (isActive() || hovered.value ? palette().textSecondary : palette().textMuted)} />
+                    ) : (
+                      <Image source={() => "cli:" + (session()?.cli ?? "terminal")}
+                        style={{ width: workspaceTabLayout.icon, height: workspaceTabLayout.icon }}
+                        paint={() => ({ opacity: isActive() || hovered.value ? 1 : workspaceTabLayout.dimOpacity,
+                          transitions: [smoothTransition("opacity", motion.fast)] })} />
+                    )
+                  }
+                </Dynamic>
+                <ShimmerText
+                  text={() => {
+                    const spec = tile();
+                    const s = session();
+                    if (spec) return tileTitle(spec, id);
+                    if (s?.cli === "terminal") return basename(s.cwd) || "Terminal";
+                    return cleanTitle(s?.title ?? "");
+                  }}
+                  font={{ family: fontFamilies.sans, size: typeScale.label }}
+                  color={() => isActive() ? palette().textPrimary
+                    : hovered.value ? palette().textSecondary : palette().textMuted}
+                  marquee={() => hovered.value || isActive()}
+                />
+                {/* Close: always on the active tab, on hover for the rest (Silica). */}
+                <Box
+                  style={{ width: workspaceTabLayout.closeSize, height: workspaceTabLayout.closeSize, align: "center", justify: "center", shrink: 0 }}
+                  onPress={() => closeSession(id)}
+                  paint={() => ({
+                    radius: radii.sm,
+                    opacity: isActive() || hovered.value ? 1 : 0,
+                    hover: { background: palette().kbdBg },
+                    transitions: [smoothTransition("opacity", motion.fast), smoothTransition("background", motion.fast)],
+                  })}
+                >
+                  <Glyph name="close" size={10} color={() => palette().textMuted} hover={() => palette().textPrimary} />
+                </Box>
+              </Row>
+            );
+          }}
+        </For>
+      </HorizontalStrip>
 
-          <Box
-            style={{ width: 22, height: 22, align: "center", justify: "center" }}
-            onPress={() => {
-              activeNav.value = "agents";
-              openTiledColumn();
-            }}
-            paint={() => ({
-              radius: radii.sm,
-              hover: { background: palette().sidebarActive },
-            })}
-          >
-            <Glyph
-              name="columns"
-              size={13}
-              color={() => palette().textSecondary}
-              hover={() => palette().textPrimary}
-            />
-          </Box>
-
-          <Box
-            style={{ width: 22, height: 22, align: "center", justify: "center" }}
-            onPress={() => {
-              activeNav.value = "agents";
-              stackTiledVertical();
-            }}
-            paint={() => ({
-              radius: radii.sm,
-              hover: { background: palette().sidebarActive },
-            })}
-          >
-            <Glyph
-              name="split"
-              size={13}
-              color={() => palette().textSecondary}
-              hover={() => palette().textPrimary}
-            />
-          </Box>
-
-          <Box
-            style={{ width: 22, height: 22, align: "center", justify: "center" }}
-            onPress={toggleTiledMaximize}
-            paint={() => ({
-              radius: radii.sm,
-              background: tilingState.value.maximized ? palette().sidebarActive : 0,
-              hover: { background: palette().sidebarActive },
-            })}
-          >
-            <Glyph
-              name="maximize"
-              size={12}
-              color={() =>
-                tilingState.value.maximized ? accent().brandText : palette().textSecondary
-              }
-            />
-          </Box>
-        </Row>
-
-        {/* Pagination controls */}
-        <Row style={{ align: "center", gap: 4, shrink: 0 }}>
-          <Box
-            style={{
-              width: 24,
-              height: 24,
-              align: "center",
-              justify: "center",
-              shrink: 0,
-            }}
-            disabled={() => currentPage.value <= 0}
-            onPress={() => {
-              if (currentPage.value > 0) {
-                const next = currentPage.value - 1;
-                currentPage.value = next;
-                const firstOnPage = sessionsState.value.items[next * TABS_PER_PAGE];
-                if (firstOnPage) selectSession(firstOnPage.id);
-              }
-            }}
-            paint={() => ({
-              radius: radii.md,
-              opacity: currentPage.value <= 0 ? 0.35 : 1,
-              hover: { background: palette().panelBg },
-              transitions: [smoothTransition("background", motion.fast)],
-            })}
-          >
-            <Glyph name="chevron-left" size={13} color={() => palette().textSecondary} />
-          </Box>
-
-          <Text
-            font={{ family: fontFamilies.mono, size: typeScale.tiny, weight: fontWeights.normal }}
-            paint={() => ({ color: palette().textMuted })}
-          >
-            {() => `${Math.min(currentPage.value + 1, totalPages())} / ${totalPages()}`}
-          </Text>
-
-          <Box
-            style={{
-              width: 24,
-              height: 24,
-              align: "center",
-              justify: "center",
-              shrink: 0,
-            }}
-            disabled={() => currentPage.value + 1 >= totalPages()}
-            onPress={() => {
-              if (currentPage.value + 1 < totalPages()) {
-                const next = currentPage.value + 1;
-                currentPage.value = next;
-                const firstOnPage = sessionsState.value.items[next * TABS_PER_PAGE];
-                if (firstOnPage) selectSession(firstOnPage.id);
-              }
-            }}
-            paint={() => ({
-              radius: radii.md,
-              opacity: currentPage.value + 1 >= totalPages() ? 0.35 : 1,
-              hover: { background: palette().panelBg },
-              transitions: [smoothTransition("background", motion.fast)],
-            })}
-          >
-            <Glyph name="chevron-right" size={13} color={() => palette().textSecondary} />
-          </Box>
-        </Row>
-      </Row>
+      {/* An empty workspace keeps a "New session" tab where the session tabs would be. */}
+      <Show when={() => !overviewOpen2.value} style={{ shrink: 0 }}>
+        {() => (
+          <Dynamic value={() => tabs().length === 0}>
+            {(empty) => empty ? (
+              <GhostButton icon="plus" label="New session" tooltip="New session" keys={() => keysFor("session.new")}
+                onPress={createSession} />
+            ) : (
+              <GhostButton icon="plus" tooltip="Open launcher" tooltipDetail="Start an agent, open a file, Git or a URL"
+                keys={() => keysFor("panel.side")}
+                onPress={() => togglePalette("launcher")} />
+            )}
+          </Dynamic>
+        )}
+      </Show>
     </Row>
   );
 }

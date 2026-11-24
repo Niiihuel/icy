@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="176" height="38" viewBox="0 0 176 38">
+  <!-- Matches workspaceTabLayout: 156px tab, 10px overhang per side (8px flare + 2px lead). -->
+  <path fill="none" stroke="white" stroke-width="1" d="
+    M0 37.5 H2 A8 8 0 0 0 10 29.5 V8.5 A8 8 0 0 1 18 0.5
+    H158 A8 8 0 0 1 166 8.5 V29.5 A8 8 0 0 0 174 37.5 H176"/>
+</svg>

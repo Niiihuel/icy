@@ -1,7 +1,5 @@
-// Accordee two-column Settings panel: Appearance & Custom JSNIR Themes, CLIs & Agents,
-// GitHub SSH Integration, Niri/Hyprland Tiling, and Updates.
-
-type SettingsTab = "appearance" | "clis" | "github" | "tiling" | "updates";
+// Accordee "Settings" screen: full-window settings sidebar (Back to workspace, quick search,
+// grouped nav) and a centered content column with section headings over hairline cards.
 
 const SETTINGS_ACCENTS: AccentName[] = [
   "neutral",
@@ -13,38 +11,78 @@ const SETTINGS_ACCENTS: AccentName[] = [
   "teal",
 ];
 
+interface SettingsPage {
+  id: SettingsTab;
+  icon: string;
+  label: string;
+  group: string;
+}
+
+const SETTINGS_PAGES: SettingsPage[] = [
+  {
+    id: "appearance",
+    icon: "palette",
+    label: "Appearance",
+    group: "Workspace",
+  },
+  {
+    id: "tiling",
+    icon: "columns",
+    label: "Layout & Shortcuts",
+    group: "Workspace",
+  },
+  {
+    id: "clis",
+    icon: "terminal",
+    label: "CLIs & Agents",
+    group: "Integrations",
+  },
+  {
+    id: "github",
+    icon: "git-branch",
+    label: "GitHub & SSH",
+    group: "Integrations",
+  },
+  {
+    id: "updates",
+    icon: "download",
+    label: "Updates",
+    group: "App",
+  },
+];
+
+function currentSettingsPage(): SettingsPage {
+  return SETTINGS_PAGES.find((p) => p.id === settingsTab.value) ?? SETTINGS_PAGES[0];
+}
+
+// Section heading (Accordee "Appearance") above a hairline card (radius 12, card background).
+// `flush` cards start with rows, whose top dividers then sit on the card edge.
 function SettingsCard(props: {
   title: Source<string>;
   description?: Source<string>;
   right?: Element;
+  flush?: boolean;
   children: Element | Element[];
 }): Element {
+  const layout = settingsLayout;
+  const stackHeading = () => narrowSettings() && props.right !== undefined;
   return (
-    <Column
-      style={{ padding: [14, 16, 14, 16], gap: 12, shrink: 0 }}
-      paint={() => ({
-        radius: radii.xl,
-        background: palette().cardBg,
-        edge: palette().border,
-        edgeWidth: spacing.hairline,
-        ...accordeeFadeUpMotion(),
-      })}
-    >
-      <Row style={{ align: "center", justify: "between", gap: 10 }}>
-        <Column style={{ gap: 2, grow: 1, minWidth: 0 }}>
+    <Column style={{ gap: layout.inset, shrink: 0 }} paint={accordeeFadeUpMotion()}>
+      <Box style={() => ({
+        direction: stackHeading() ? "column" : "row",
+        align: stackHeading() ? "start" : "center",
+        justify: "between", gap: layout.fieldGap,
+      })}>
+        <Column style={{ gap: spacing.unit / 2, grow: 1, minWidth: 0 }}>
           <Text
-            font={{
-              family: fontFamilies.sans,
-              size: typeScale.body,
-              weight: fontWeights.semibold,
-            }}
+            font={{ family: fontFamilies.sans, size: typeScale.title, weight: fontWeights.medium }}
             paint={() => ({ color: palette().textPrimary })}
           >
             {props.title}
           </Text>
           {props.description ? (
             <Text
-              font={{ family: fontFamilies.sans, size: typeScale.caption }}
+              font={{ family: fontFamilies.sans, size: typeScale.label }}
               paint={() => ({ color: palette().textMuted })}
             >
               {props.description}
@@ -52,386 +90,451 @@ function SettingsCard(props: {
           ) : null}
         </Column>
         {props.right ?? null}
-      </Row>
-      {props.children}
+      </Box>
+      <Column
+        style={{ padding: props.flush ? 0 : layout.inset, gap: props.flush ? 0 : layout.inset, clip: true }}
+        paint={() => ({
+          radius: radii.lg,
+          background: palette().sidebarBg,
+          edge: palette().border,
+          edgeWidth: spacing.hairline,
+        })}
+      >
+        {props.children}
+      </Column>
     </Column>
   );
 }
 
+function narrowSettings(): boolean {
+  return viewportSize.value[0] < settingsLayout.stackedAt;
+}
+
+// Text and controls are stacked when the content column becomes narrow.
 function SettingsRowItem(props: {
   title: Source<string>;
-  subtitle: Source<string>;
+  subtitle?: Source<string>;
+  divider?: Source<boolean>;
   control: Element;
 }): Element {
   return (
-    <Row
-      style={{
-        padding: [8, 0, 8, 0],
-        align: "center",
+    <Box
+      style={() => ({
+        direction: narrowSettings() ? "column" : "row",
+        padding: settingsLayout.rowPadding,
+        align: narrowSettings() ? "start" : "center",
         justify: "between",
-        gap: 12,
-      }}
+        gap: narrowSettings() ? settingsLayout.inset : settingsLayout.fieldGap,
+      })}
       paint={() => ({
         edge: palette().border,
-        edgeWidth: spacing.hairline,
+        edgeWidth: read(props.divider ?? true) ? spacing.hairline : 0,
         edgeSides: [1, 0, 0, 0],
       })}
     >
-      <Column style={{ gap: 2, grow: 1, minWidth: 0 }}>
-        <Text
-          font={{
-            family: fontFamilies.sans,
-            size: typeScale.label,
-            weight: fontWeights.medium,
-          }}
-          paint={() => ({ color: palette().textPrimary })}
-        >
+      <Column style={{ gap: spacing.unit / 2, grow: 1, minWidth: 0 }}>
+        <Text font={{ family: fontFamilies.sans, size: typeScale.body }}
+          paint={() => ({ color: palette().textPrimary })}>
           {props.title}
         </Text>
-        <Text
-          font={{ family: fontFamilies.sans, size: typeScale.tiny }}
-          paint={() => ({ color: palette().textMuted })}
-        >
-          {props.subtitle}
-        </Text>
+        {props.subtitle !== undefined ? (
+          <Text font={{ family: fontFamilies.sans, size: typeScale.caption, lineHeight: 1.4 }}
+            paint={() => ({ color: palette().textMuted })}>
+            {props.subtitle}
+          </Text>
+        ) : null}
       </Column>
-      {props.control}
+      <Box style={{ shrink: 0 }}>{props.control}</Box>
+    </Box>
+  );
+}
+
+function KeybindRow(props: { item: () => KeybindView; divider: () => boolean }): Element {
+  const recording = () => keybindRecording.value === props.item().id;
+  const actionSlot = { width: iconButtonLayout.md.size, shrink: 0 };
+  return (
+    <SettingsRowItem title={() => props.item().label} subtitle={() => props.item().description}
+      divider={props.divider}
+      control={
+        <Row style={{ align: "center", gap: settingsLayout.inset, shrink: 0 }}>
+          <Dynamic value={() => recording() ? "\u0002" : props.item().chords.join("\u0001")} style={{ shrink: 0 }}>
+            {(value) => value === "\u0002" ? (
+              <Row style={{ align: "center", gap: spacing.unit }}>
+                <Text font={{ family: fontFamilies.sans, size: typeScale.caption }}
+                  paint={() => ({ color: accent().brandText })}>Press keys…</Text>
+                <KbdKey label="Esc" />
+              </Row>
+            ) : value === "" ? (
+              <Text font={{ family: fontFamilies.sans, size: typeScale.caption }}
+                paint={() => ({ color: palette().textMuted })}>Unassigned</Text>
+            ) : (
+              <Box style={() => ({
+                direction: narrowSettings() ? "column" : "row", gap: spacing.unit, align: "start",
+              })}>
+                {value.split("\u0001").map((chord) => (
+                  <Row style={{ gap: spacing.unit / 2 }}>
+                    {chordParts(chord).map((key) => <KbdKey label={key} />)}
+                  </Row>
+                ))}
+              </Box>
+            )}
+          </Dynamic>
+          <Row style={{ align: "center", gap: spacing.unit / 2, shrink: 0 }}>
+            <Dynamic value={recording} style={actionSlot}>
+              {(active) => active ? (
+                <IconButton icon="close" label="Cancel recording" highlighted onPress={stopKeybindRecording} />
+              ) : (
+                <IconButton icon="keyboard" label="Record shortcut"
+                  onPress={() => startKeybindRecording(props.item().id)} />
+              )}
+            </Dynamic>
+            <Show when={() => !recording() && props.item().chords.length > 0} style={actionSlot}>
+              {() => <IconButton icon="close" label="Unassign shortcut"
+                onPress={() => requestHost({ type: "setKeybind", id: props.item().id, chord: "" })} />}
+            </Show>
+            <Show when={() => !recording() && props.item().customized} style={actionSlot}>
+              {() => <IconButton icon="refresh" label="Restore default shortcut"
+                onPress={() => requestHost({ type: "resetKeybind", id: props.item().id })} />}
+            </Show>
+          </Row>
+        </Row>
+      }
+    />
+  );
+}
+
+function SettingsNavItem(props: { page: SettingsPage }): Element {
+  const active = () => settingsTab.value === props.page.id;
+  return (
+    <Row
+      style={{ height: 30, padding: [0, 8, 0, 8], align: "center", gap: 8, shrink: 0 }}
+      onPress={() => {
+        if (settingsTab.value !== props.page.id && keybindRecording.value) stopKeybindRecording();
+        settingsTab.value = props.page.id;
+      }}
+      paint={() => ({
+        radius: radii.md,
+        background: active() ? palette().sidebarActive : 0,
+        hover: { background: palette().sidebarActive },
+        transitions: [smoothTransition("background", motion.fast)],
+      })}
+    >
+      <Glyph
+        name={props.page.icon}
+        size={16}
+        color={() => (active() ? palette().textPrimary : palette().textSecondary)}
+      />
+      <Text
+        lines={1}
+        style={{ grow: 1, minWidth: 0 }}
+        font={{ family: fontFamilies.sans, size: typeScale.label }}
+        paint={() => ({ color: active() ? palette().textPrimary : palette().textSubtle })}
+      >
+        {() => narrowSettings() && props.page.id === "tiling" ? "Shortcuts" : props.page.label}
+      </Text>
     </Row>
   );
 }
 
-function SettingsView(): Element {
-  const tab = signal<SettingsTab>("appearance");
-
-  const navItem = (id: SettingsTab, icon: string, label: string): Element => {
-    const active = () => tab.value === id;
-    return (
+function SettingsSidebar(): Element {
+  const query = signal("");
+  const visible = (group: string) => () =>
+    SETTINGS_PAGES.filter(
+      (p) => p.group === group && p.label.toLowerCase().includes(query.value.trim().toLowerCase())
+    );
+  const groups = ["Workspace", "Integrations", "App"];
+  return (
+    <Column
+      style={() => ({
+        width: narrowSettings() ? settingsLayout.narrowSidebarWidth : settingsLayout.sidebarWidth,
+        shrink: 0, padding: [settingsLayout.fieldGap, settingsLayout.inset, settingsLayout.inset, settingsLayout.inset],
+        gap: spacing.unit / 2,
+      })}
+      paint={() => ({ background: palette().sidebarBg, ...accordeeFadeUpMotion() })}
+    >
       <Row
-        style={() => ({
-          height: rowControlHeight(),
-          padding: [0, 10, 0, 10],
-          align: "center",
-          gap: 8,
-          shrink: 0,
-        })}
+        style={{ height: 28, padding: [0, 8, 0, 6], align: "center", gap: 8, shrink: 0 }}
         onPress={() => {
-          tab.value = id;
+          if (keybindRecording.value) stopKeybindRecording();
+          activeNav.value = "agents";
         }}
-        paint={() => ({
-          radius: radii.md,
-          background: active() ? palette().sidebarActive : 0,
-          hover: { background: palette().sidebarActive },
-          transitions: [smoothTransition("background", motion.fast)],
-        })}
+        paint={() => ({ radius: radii.md, hover: { background: palette().sidebarActive } })}
       >
-        <Glyph
-          name={icon}
-          size={14}
-          color={() => (active() ? palette().textPrimary : palette().textMuted)}
-        />
+        <Glyph name="arrow-left" size={15} color={() => palette().textSecondary} hover={() => palette().textPrimary} />
         <Text
-          font={{
-            family: fontFamilies.sans,
-            size: typeScale.label,
-            weight: fontWeights.medium,
-          }}
-          paint={() => ({
-            color: active() ? palette().textPrimary : palette().textSecondary,
-          })}
+          lines={1}
+          style={{ grow: 1, minWidth: 0 }}
+          font={{ family: fontFamilies.sans, size: typeScale.label }}
+          paint={() => ({ color: palette().textSecondary })}
         >
-          {label}
+          {() => narrowSettings() ? "Back" : "Back to workspace"}
         </Text>
       </Row>
-    );
-  };
-
-  return (
-    <Row style={{ grow: 1, minWidth: 0, minHeight: 0 }}>
-      {/* Left Settings Category Rail */}
-      <Column
-        style={{
-          width: 196,
-          shrink: 0,
-          padding: [14, 10, 14, 12],
-          gap: 4,
-        }}
-        paint={() => ({
-          edge: palette().border,
-          edgeWidth: spacing.hairline,
-          edgeSides: [0, 1, 0, 0],
-        })}
-      >
+      <Box style={{ padding: [14, 8, 14, 8], shrink: 0 }}>
         <Text
-          style={{ padding: [0, 8, 8, 8] }}
-          font={{
-            family: fontFamilies.sans,
-            size: typeScale.subtitle,
-            weight: fontWeights.semibold,
-          }}
+          font={{ family: fontFamilies.sans, size: typeScale.heading, weight: fontWeights.medium }}
           paint={() => ({ color: palette().textPrimary })}
         >
           Settings
         </Text>
-        {navItem("appearance", "palette", "Themes & Visuals")}
-        {navItem("clis", "terminal", "CLIs & Agents")}
-        {navItem("github", "git-branch", "GitHub & SSH")}
-        {navItem("tiling", "columns", "Tiling & Layout")}
-        {navItem("updates", "download", "Updates")}
-      </Column>
-
-      {/* Right Scrollable Settings Body */}
-      <Column
-        style={{
-          grow: 1,
-          minWidth: 0,
-          minHeight: 0,
-          scroll: true,
-          padding: [16, 22, 24, 22],
-          gap: 14,
-        }}
+      </Box>
+      <Row
+        style={{ height: 32, margin: [0, 0, 8, 0], padding: [0, 6, 0, 10], align: "center", gap: 8, shrink: 0 }}
+        paint={() => ({
+          radius: radii.md,
+          background: palette().appBg,
+          edge: palette().border,
+          edgeWidth: spacing.hairline,
+        })}
       >
-        <Dynamic value={() => tab.value}>
-          {(current) => {
-            if (current === "appearance") {
-              return (
-                <Column style={{ gap: 14 }}>
-                  <SettingsCard
-                    title="Custom JSNIR Themes"
-                    description={() =>
-                      `Edit or drop any .json theme file in ${themesDirPath.value} and click Reload.`
-                    }
-                    right={
-                      <Row style={{ gap: 6 }}>
-                        <SecondaryButton label="Reload" height={26} onPress={reloadThemes} />
-                        <SecondaryButton label="Open Folder" height={26} onPress={openThemesDir} />
-                      </Row>
-                    }
-                  >
-                    <For
-                      each={() => themesList.value}
-                      key={(item) => item.id}
-                      style={{ gap: 8 }}
-                    >
-                      {(item) => {
-                        const selected = () => activeThemeId.value === item().id;
-                        return (
-                          <Row
-                            style={{
-                              padding: [10, 12, 10, 12],
-                              align: "center",
-                              justify: "between",
-                              gap: 10,
-                            }}
-                            onPress={() => {
-                              activeThemeId.value = item().id;
-                              themeMode.value = item().mode === "light" ? "light" : "dark";
-                              updateConfig({
-                                theme: item().id,
-                                mode: item().mode === "light" ? "light" : "dark",
-                              });
-                            }}
-                            paint={() => ({
-                              radius: radii.lg,
-                              background: selected()
-                                ? palette().sidebarActive
-                                : palette().panelBg,
-                              edge: selected() ? accent().brand : palette().border,
-                              edgeWidth: selected() ? 1 : spacing.hairline,
-                              hover: { background: palette().sidebarActive },
-                              transitions: [
-                                smoothTransition("background", motion.fast),
-                                smoothTransition("edge", motion.fast),
-                              ],
-                            })}
-                          >
-                            <Row style={{ align: "center", gap: 10 }}>
-                              {/* 4-swatch preview pill */}
-                              <Row style={{ gap: 3 }}>
-                                <Box
-                                  style={{ width: 14, height: 14 }}
-                                  paint={() => ({
-                                    radius: 4,
-                                    background: item().colors.appBg,
-                                    edge: palette().border,
-                                    edgeWidth: 0.5,
-                                  })}
-                                />
-                                <Box
-                                  style={{ width: 14, height: 14 }}
-                                  paint={() => ({
-                                    radius: 4,
-                                    background: item().colors.sidebarBg,
-                                    edge: palette().border,
-                                    edgeWidth: 0.5,
-                                  })}
-                                />
-                                <Box
-                                  style={{ width: 14, height: 14 }}
-                                  paint={() => ({
-                                    radius: 4,
-                                    background: item().colors.panelBg,
-                                    edge: palette().border,
-                                    edgeWidth: 0.5,
-                                  })}
-                                />
-                                <Box
-                                  style={{ width: 14, height: 14 }}
-                                  paint={() => ({
-                                    radius: 4,
-                                    background: item().colors.highlight,
-                                  })}
-                                />
-                              </Row>
-                              <Column style={{ gap: 1 }}>
-                                <Text
-                                  font={{
-                                    family: fontFamilies.sans,
-                                    size: typeScale.label,
-                                    weight: fontWeights.medium,
-                                  }}
-                                  paint={() => ({ color: palette().textPrimary })}
-                                >
-                                  {() => item().name}
-                                </Text>
-                                <Text
-                                  font={{ family: fontFamilies.mono, size: typeScale.micro }}
-                                  paint={() => ({ color: palette().textMuted })}
-                                >
-                                  {() => `${item().mode} · ${item().author}`}
-                                </Text>
-                              </Column>
-                            </Row>
-                            <Show when={selected}>
-                              {() => (
-                                <Glyph name="check" size={14} color={() => accent().brandText} />
-                              )}
-                            </Show>
-                          </Row>
-                        );
-                      }}
-                    </For>
-                  </SettingsCard>
+        <Glyph name="search" size={15} color={() => palette().textMuted} />
+        <TextInput
+          style={{ grow: 1, height: 24, padding: [3, 2, 2, 0] }}
+          font={{ family: fontFamilies.sans, size: typeScale.label }}
+          placeholder="Find a setting"
+          placeholderColor={palette().textMuted}
+          onChange={(text) => {
+            query.value = text;
+          }}
+          paint={() => ({ color: palette().textPrimary })}
+        />
+      </Row>
+      {groups.map((group) => (
+        <Show when={() => visible(group)().length > 0} style={{ shrink: 0 }}>
+          {() => (
+            <Column style={{ gap: 1 }}>
+              <Box style={{ padding: [14, 8, 6, 8] }}>
+                <Text
+                  font={{ family: fontFamilies.sans, size: typeScale.caption }}
+                  paint={() => ({ color: palette().textMuted })}
+                >
+                  {group}
+                </Text>
+              </Box>
+              <For each={visible(group)} key={(p) => p.id} style={{ gap: 1 }}>
+                {(page) => <SettingsNavItem page={page()} />}
+              </For>
+            </Column>
+          )}
+        </Show>
+      ))}
+      <Box style={{ grow: 1 }} />
+      <Row
+        style={{ height: 36, padding: [0, 8, 0, 8], align: "center", gap: 8, shrink: 0 }}
+        paint={() => ({ edge: palette().border, edgeWidth: spacing.hairline, edgeSides: [1, 0, 0, 0] })}
+      >
+        <Image source="brand:icy" style={{ width: 16, height: 16 }} />
+        <Text
+          font={{ family: fontFamilies.sans, size: typeScale.caption }}
+          paint={() => ({ color: palette().textMuted })}
+        >
+          {() => `icy v${updateState.value.currentVersion}`}
+        </Text>
+      </Row>
+    </Column>
+  );
+}
 
-                  <SettingsCard
-                    title="Accent, Density & Typography"
-                    description="Fine-tune Accordee accents, UI spacing density, and terminal font size."
-                  >
-                    <SettingsRowItem
-                      title="Accent color"
-                      subtitle="Used for focused tiling borders, active indicators, and primary actions."
-                      control={
-                        <Row style={{ gap: 6 }}>
-                          {SETTINGS_ACCENTS.map((name) => (
-                            <Box
-                              style={{ width: 20, height: 20, shrink: 0 }}
-                              onPress={() => {
-                                themeAccent.value = name;
-                                updateConfig({ accent: name });
-                              }}
-                              paint={() => ({
-                                radius: 10,
-                                background:
-                                  themeMode.value === "dark"
-                                    ? accentsDark[name].brand
-                                    : accentsLight[name].brand,
-                                edge:
-                                  themeAccent.value === name
-                                    ? palette().textPrimary
-                                    : palette().border,
-                                edgeWidth: themeAccent.value === name ? 1.5 : 0.5,
-                                hover: { scale: 1.15 },
-                                transitions: [smoothTransition("scale", motion.fast)],
-                              })}
-                            />
-                          ))}
-                        </Row>
-                      }
-                    />
-                    <SettingsRowItem
-                      title="Interface density"
-                      subtitle="Compact shrinks row heights to fit more agents and files on screen."
-                      control={
-                        <Row style={{ gap: 6 }}>
-                          <SecondaryButton
-                            label="Comfortable"
-                            height={26}
-                            onPress={() => {
-                              densityMode.value = "comfortable";
-                              updateConfig({ density: "comfortable" });
-                            }}
-                          />
-                          <SecondaryButton
-                            label="Compact"
-                            height={26}
-                            onPress={() => {
-                              densityMode.value = "compact";
-                              updateConfig({ density: "compact" });
-                            }}
-                          />
-                        </Row>
-                      }
-                    />
-                    <SettingsRowItem
-                      title="Terminal font size"
-                      subtitle="Geist Mono size in logical pixels (recomputes PTY columns/rows live)."
-                      control={
-                        <Row style={{ align: "center", gap: 8 }}>
-                          <SecondaryButton
-                            label="-"
-                            height={26}
-                            onPress={() => {
-                              const next = Math.max(11, terminalFontSize.value - 1);
-                              terminalFontSize.value = next;
-                              updateConfig({ fontSize: next });
-                            }}
-                          />
-                          <Text
-                            font={{ family: fontFamilies.mono, size: typeScale.label }}
-                            paint={() => ({ color: palette().textPrimary })}
-                          >
-                            {() => `${terminalFontSize.value}px`}
-                          </Text>
-                          <SecondaryButton
-                            label="+"
-                            height={26}
-                            onPress={() => {
-                              const next = Math.min(18, terminalFontSize.value + 1);
-                              terminalFontSize.value = next;
-                              updateConfig({ fontSize: next });
-                            }}
-                          />
-                        </Row>
-                      }
-                    />
-                  </SettingsCard>
+function SettingsShell(): Element {
+  return (
+    <Row style={{ grow: 1, minHeight: 0, align: "stretch" }}>
+      <SettingsSidebar />
+      <Column
+        style={{ grow: 1, minWidth: 0, minHeight: 0, margin: [8, 8, 8, 0], clip: true }}
+        paint={() => ({
+          radius: radii.lg,
+          // No outline: the frame reads through the sidebar/app background contrast.
+          background: palette().appBg,
+          shadows: [shadows.panel],
+        })}
+      >
+        <SettingsView />
+      </Column>
+    </Row>
+  );
+}
+
+// niri's layout options: how the strip scrolls to the focused column and how wide new ones open.
+function TilingSettings(): Element {
+  const layout = () => configState.value.layout;
+  const center = signal(layout().centerFocusedColumn);
+  const width = signal(layout().defaultColumnWidth);
+  effect(() => {
+    center.value = layout().centerFocusedColumn;
+    width.value = layout().defaultColumnWidth;
+  });
+  const save = (change: Partial<TilingLayoutOptions>) => updateConfig({ layout: { ...layout(), ...change } });
+  const centers = [
+    { id: "never", label: "Never" },
+    { id: "on-overflow", label: "On overflow" },
+    { id: "always", label: "Always" },
+  ] as const;
+  const widths = [
+    { id: 1 / 3, label: "1/3" },
+    { id: 0.5, label: "1/2" },
+    { id: 2 / 3, label: "2/3" },
+    { id: 1, label: "Full" },
+  ] as const;
+  return (
+    <SettingsCard flush title="Tiling" description="niri's scrollable layout: how the strip follows focus.">
+      <SettingsRowItem title="Center focused column"
+        subtitle="Never scrolls the least; on overflow centers when two columns don't fit together."
+        divider={false}
+        control={<SegmentedControl value={center} choices={centers}
+          onSelect={(centerFocusedColumn) => save({ centerFocusedColumn })} />} />
+      <SettingsRowItem title="New column width" subtitle="niri default-column-width."
+        control={<SegmentedControl value={width} choices={widths}
+          onSelect={(defaultColumnWidth) => save({ defaultColumnWidth })} />} />
+      <SettingsRowItem title="Center a lone column" subtitle="A single window sits in the middle of the screen."
+        control={<ToggleSwitch checked={() => layout().alwaysCenterSingleColumn}
+          onToggle={() => save({ alwaysCenterSingleColumn: !layout().alwaysCenterSingleColumn })} />} />
+    </SettingsCard>
+  );
+}
+
+function AppearanceSettings(): Element {
+  const layout = settingsLayout;
+  const swatches = ["appBg", "sidebarBg", "panelBg", "highlight"] as const;
+  const densities = [
+    { id: "comfortable", label: "Comfortable" },
+    { id: "compact", label: "Compact" },
+  ] as const;
+  const setFontSize = (delta: number) => {
+    const next = Math.min(18, Math.max(11, terminalFontSize.value + delta));
+    if (next === terminalFontSize.value) return;
+    terminalFontSize.value = next;
+    updateConfig({ fontSize: next });
+  };
+
+  return (
+    <Column style={{ gap: layout.sectionGap }}>
+      <SettingsCard flush title="Themes" description="Load custom JSON themes from the themes folder."
+        right={
+          <Row style={{ gap: spacing.unit, shrink: 0 }}>
+            <IconButton icon="refresh" label="Reload themes" onPress={reloadThemes} />
+            <IconButton icon="folder-open" label="Open themes folder"
+              detail={() => themesDirPath.value} onPress={openThemesDir} />
+          </Row>
+        }
+      >
+        <For each={() => themesList.value} key={(theme) => theme.id}>
+          {(theme) => {
+            const selected = () => activeThemeId.value === theme().id;
+            return (
+              <Row style={{ padding: layout.rowPadding, gap: layout.inset, align: "center" }}
+                onPress={() => {
+                  const mode = theme().mode === "light" ? "light" : "dark";
+                  activeThemeId.value = theme().id;
+                  themeMode.value = mode;
+                  updateConfig({ theme: theme().id, mode });
+                }}
+                paint={() => ({
+                  background: selected() ? palette().sidebarActive : 0,
+                  edge: palette().border,
+                  edgeWidth: themesList.value[0]?.id === theme().id ? 0 : spacing.hairline,
+                  edgeSides: [1, 0, 0, 0],
+                  hover: { background: palette().sidebarActive },
+                  transitions: [smoothTransition("background", motion.fast)],
+                })}
+              >
+                <Column style={{ grow: 1, minWidth: 0, gap: spacing.unit / 2 }}>
+                  <Text lines={1} font={{ family: fontFamilies.sans, size: typeScale.body, weight: fontWeights.medium }}
+                    paint={() => ({ color: palette().textPrimary })}>{() => theme().name}</Text>
+                  <Text lines={1} font={{ family: fontFamilies.sans, size: typeScale.caption }}
+                    paint={() => ({ color: palette().textMuted })}>{() => theme().author}</Text>
                 </Column>
-              );
-            }
+                <Row style={{ gap: spacing.unit, shrink: 0 }}>
+                  {swatches.map((color) => (
+                    <Box style={{ width: layout.swatchSize, height: layout.swatchSize }}
+                      paint={() => ({ radius: radii.xs, background: theme().colors[color],
+                        edge: palette().border, edgeWidth: spacing.hairline })} />
+                  ))}
+                </Row>
+                <Box style={{ width: layout.icon, height: layout.icon, shrink: 0 }}
+                  paint={() => ({ opacity: selected() ? 1 : 0, transitions: [smoothTransition("opacity", motion.fast)] })}>
+                  <Glyph name="check" size={layout.icon} color={() => accent().brandText} />
+                </Box>
+              </Row>
+            );
+          }}
+        </For>
+      </SettingsCard>
+
+      <TilingSettings />
+      <SettingsCard flush title="Interface">
+        <SettingsRowItem divider={false} title="Accent color" control={
+          <Row style={{ gap: spacing.unit, align: "center" }}>
+            {SETTINGS_ACCENTS.map((name) => (
+              <HintTooltip label={name[0].toUpperCase() + name.slice(1)} side="top">
+                <Box style={{ width: layout.accentSize, height: layout.accentSize, shrink: 0 }}
+                  onPress={() => {
+                    themeAccent.value = name;
+                    updateConfig({ accent: name });
+                  }}
+                  paint={() => ({
+                    radius: layout.accentSize / 2,
+                    background: (themeMode.value === "dark" ? accentsDark : accentsLight)[name].brand,
+                    edge: themeAccent.value === name ? palette().textPrimary : palette().border,
+                    edgeWidth: themeAccent.value === name ? spacing.hairline * 3 : spacing.hairline,
+                    hover: { scale: 1.12 },
+                    transitions: [springTransition("scale"), smoothTransition("edge", motion.fast)],
+                  })} />
+              </HintTooltip>
+            ))}
+          </Row>
+        } />
+        <SettingsRowItem title="Interface density" control={
+          <SegmentedControl value={densityMode} choices={densities}
+            onSelect={(density) => updateConfig({ density })} />
+        } />
+        <SettingsRowItem title="Terminal font size" subtitle={fontFamilies.mono} control={
+          <Row style={{ align: "center", gap: spacing.unit }}>
+            <SecondaryButton label="−" height={spacing.control} onPress={() => setFontSize(-1)} />
+            <Text font={{ family: fontFamilies.mono, size: typeScale.label }}
+              paint={() => ({ color: palette().textPrimary })}>{() => `${terminalFontSize.value} px`}</Text>
+            <SecondaryButton label="+" height={spacing.control} onPress={() => setFontSize(1)} />
+          </Row>
+        } />
+      </SettingsCard>
+    </Column>
+  );
+}
+
+function SettingsView(): Element {
+  return (
+    <Column style={{ grow: 1, minHeight: 0, scroll: true }}>
+      <Row style={{ justify: "center", padding: settingsLayout.pagePadding }}>
+        <Column style={{ grow: 1, minWidth: 0, maxWidth: settingsLayout.pageWidth, gap: settingsLayout.sectionGap }}>
+          <Text font={{ family: fontFamilies.sans, size: typeScale.displaySm, weight: fontWeights.medium }}
+            paint={() => ({ color: palette().textPrimary })}>
+            {() => currentSettingsPage().label}
+          </Text>
+        <Dynamic value={() => settingsTab.value}>
+          {(current) => {
+            if (current === "appearance") return <AppearanceSettings />;
 
             if (current === "clis") {
               return (
                 <SettingsCard
-                  title="Agent CLIs (herdr-style)"
-                  description="Enable, configure, and launch terminal agents directly in new tiled columns."
+                  flush
+                  title="Configured agents"
                 >
                   <For
                     each={() => configState.value.clis}
                     key={(cli) => cli.id}
-                    style={{ gap: 8 }}
                   >
                     {(cli) => (
                       <Row
                         style={{
-                          padding: [10, 12, 10, 12],
+                          padding: settingsLayout.rowPadding,
                           align: "center",
                           justify: "between",
                           gap: 10,
                         }}
                         paint={() => ({
-                          radius: radii.lg,
-                          background: palette().panelBg,
                           edge: palette().border,
-                          edgeWidth: spacing.hairline,
+                          edgeWidth: configState.value.clis[0]?.id === cli().id ? 0 : spacing.hairline,
+                          edgeSides: [1, 0, 0, 0],
                         })}
                       >
                         <Row style={{ align: "center", gap: 10, grow: 1, minWidth: 0 }}>
@@ -486,26 +589,23 @@ function SettingsView(): Element {
               const gh = () => githubState.value;
               return (
                 <SettingsCard
-                  title="GitHub SSH Integration"
-                  description="Automatically detects ~/.ssh keys, git@github.com handshake, and workspace repository."
+                  flush
+                  title="SSH connection"
                   right={
                     <SecondaryButton label="Re-detect SSH" height={26} onPress={refreshGitHub} />
                   }
                 >
                   <Row
                     style={{
-                      padding: [12, 14, 12, 14],
+                      padding: settingsLayout.rowPadding,
                       align: "center",
                       justify: "between",
                       gap: 12,
                     }}
                     paint={() => ({
-                      radius: radii.lg,
                       background: gh().connected
                         ? palette().successBg
-                        : palette().panelBg,
-                      edge: palette().border,
-                      edgeWidth: spacing.hairline,
+                        : 0,
                     })}
                   >
                     <Row style={{ align: "center", gap: 10 }}>
@@ -571,98 +671,52 @@ function SettingsView(): Element {
             }
 
             if (current === "tiling") {
-              const mode = () => tilingState.value.mode;
+              const keys = (k: string[]) => (
+                <Row style={{ gap: 3, shrink: 0 }}>
+                  {k.map((label) => (
+                    <KbdKey label={label} />
+                  ))}
+                </Row>
+              );
+              const groups = ["Views", "Sessions & tabs", "Windows", "Workspaces", "Layout", "Editor"];
               return (
-                <Column style={{ gap: 14 }}>
-                  <SettingsCard
-                    title="Window Tiling Engine"
-                    description="Choose between Niri scrollable columns or Hyprland automatic dynamic splits."
-                  >
-                    <Row style={{ gap: 10 }}>
-                      <Column
-                        style={{ grow: 1, padding: [12, 14, 12, 14], gap: 4 }}
-                        onPress={() => setTilingMode("niri")}
-                        paint={() => ({
-                          radius: radii.lg,
-                          background:
-                            mode() === "niri" ? palette().sidebarActive : palette().panelBg,
-                          edge: mode() === "niri" ? accent().brand : palette().border,
-                          edgeWidth: mode() === "niri" ? 1 : spacing.hairline,
-                        })}
+                <Column style={{ gap: settingsLayout.sectionGap }}>
+                  <Show when={() => keybindNotice.value.length > 0}
+                    style={() => ({ shrink: 0, position: keybindNotice.value.length > 0 ? "relative" : "absolute" })}>
+                    {() => (
+                      <Row
+                        style={{ height: 36, padding: [0, 12, 0, 12], align: "center", gap: 8 }}
+                        paint={() => ({ radius: radii.lg, background: palette().warningBg, ...accordeeFadeUpMotion() })}
                       >
+                        <Glyph name="alert" size={15} color={() => palette().warningText} />
                         <Text
-                          font={{
-                            family: fontFamilies.sans,
-                            size: typeScale.label,
-                            weight: fontWeights.semibold,
-                          }}
-                          paint={() => ({ color: palette().textPrimary })}
+                          style={{ grow: 1 }}
+                          font={{ family: fontFamilies.sans, size: typeScale.label }}
+                          paint={() => ({ color: palette().warningText })}
                         >
-                          Niri · Scrollable Columns
+                          {() => keybindNotice.value}
                         </Text>
-                        <Text
-                          font={{ family: fontFamilies.sans, size: typeScale.tiny, lineHeight: 1.4 }}
-                          paint={() => ({ color: palette().textMuted })}
-                        >
-                          2 wide columns on screen; extra agents scroll horizontally in an infinite strip.
-                        </Text>
-                      </Column>
-
-                      <Column
-                        style={{ grow: 1, padding: [12, 14, 12, 14], gap: 4 }}
-                        onPress={() => setTilingMode("hyprland")}
-                        paint={() => ({
-                          radius: radii.lg,
-                          background:
-                            mode() === "hyprland" ? palette().sidebarActive : palette().panelBg,
-                          edge: mode() === "hyprland" ? accent().brand : palette().border,
-                          edgeWidth: mode() === "hyprland" ? 1 : spacing.hairline,
-                        })}
-                      >
-                        <Text
-                          font={{
-                            family: fontFamilies.sans,
-                            size: typeScale.label,
-                            weight: fontWeights.semibold,
-                          }}
-                          paint={() => ({ color: palette().textPrimary })}
-                        >
-                          Hyprland · Dynamic Splits
-                        </Text>
-                        <Text
-                          font={{ family: fontFamilies.sans, size: typeScale.tiny, lineHeight: 1.4 }}
-                          paint={() => ({ color: palette().textMuted })}
-                        >
-                          Shows up to 3 columns side-by-side with vertical stacking inside each column.
-                        </Text>
-                      </Column>
-                    </Row>
-                  </SettingsCard>
-
-                  <SettingsCard
-                    title="Keyboard Shortcuts"
-                    description="Works directly while typing in any terminal session."
-                  >
-                    <SettingsRowItem
-                      title="New tiled column"
-                      subtitle="Opens a new PTY column next to the focused pane."
-                      control={<KbdKey label="Ctrl+Shift+N" />}
-                    />
-                    <SettingsRowItem
-                      title="Split vertically in column"
-                      subtitle="Stacks a second terminal pane below the focused pane."
-                      control={<KbdKey label="Ctrl+Shift+D" />}
-                    />
-                    <SettingsRowItem
-                      title="Move focus between panes"
-                      subtitle="Directional focus across columns and stacked panes."
-                      control={<KbdKey label="Alt + H/J/K/L" />}
-                    />
-                    <SettingsRowItem
-                      title="Toggle pane maximize"
-                      subtitle="Expand the focused terminal full-width, or restore tiling."
-                      control={<KbdKey label="Ctrl+Shift+M" />}
-                    />
+                      </Row>
+                    )}
+                  </Show>
+                  {groups.map((group) => {
+                    const rows = () => keybindsState.value.filter((keybind) => keybind.group === group);
+                    return (
+                      <Show when={() => rows().length > 0}>
+                        {() => (
+                          <SettingsCard flush title={group}>
+                            <For each={rows} key={(keybind) => keybind.id}>
+                              {(keybind) => <KeybindRow item={keybind} divider={() => rows()[0]?.id !== keybind().id} />}
+                            </For>
+                          </SettingsCard>
+                        )}
+                      </Show>
+                    );
+                  })}
+                  <SettingsCard flush title="Image viewer" description="Fixed keys while the viewer is open.">
+                    <SettingsRowItem divider={false} title="Previous / next" subtitle="Steps through the images on screen." control={keys(["←", "→"])} />
+                    <SettingsRowItem title="Zoom" subtitle="Also the mouse wheel or a touchpad pinch." control={keys(["+", "−", "0"])} />
+                    <SettingsRowItem title="Close" subtitle="Back to the terminal." control={keys(["Esc"])} />
                   </SettingsCard>
                 </Column>
               );
@@ -672,7 +726,8 @@ function SettingsView(): Element {
             const up = () => updateState.value;
             return (
               <SettingsCard
-                title="Software Updates"
+                flush
+                title="Software updates"
                 description={() => `Installed icy v${up().currentVersion} · GitHub Releases`}
                 right={
                   <Row style={{ gap: 6 }}>
@@ -688,6 +743,7 @@ function SettingsView(): Element {
                 }
               >
                 <SettingsRowItem
+                  divider={false}
                   title={() =>
                     up().hasUpdate
                       ? `Update v${up().availableVersion} available`
@@ -744,7 +800,8 @@ function SettingsView(): Element {
             );
           }}
         </Dynamic>
-      </Column>
-    </Row>
+        </Column>
+      </Row>
+    </Column>
   );
 }

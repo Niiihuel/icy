@@ -144,6 +144,26 @@ fn probe_gh_cli_user() -> Option<String> {
     (!login.is_empty()).then_some(login)
 }
 
+/// GitHub logins are 1-39 ASCII alphanumerics or hyphens; anything else never reaches a URL.
+pub fn is_valid_login(login: &str) -> bool {
+    (1..=39).contains(&login.len()) && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Downloads the public avatar of `login` (`https://github.com/<login>.png`) to `dest`.
+pub fn fetch_avatar(login: &str, dest: &Path) -> bool {
+    if !is_valid_login(login) {
+        return false;
+    }
+    Command::new("curl")
+        .args(["-fsSL", "--connect-timeout", "4", "--max-time", "10", "-o"])
+        .arg(dest)
+        .arg(format!("https://github.com/{login}.png?size=96"))
+        .stdin(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+        && fs::metadata(dest).is_ok_and(|m| m.len() > 0)
+}
+
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .args(args)
@@ -189,6 +209,16 @@ pub fn parse_github_slug(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_github_logins() {
+        assert!(is_valid_login("Niiihuel"));
+        assert!(is_valid_login("a-b-1"));
+        assert!(!is_valid_login(""));
+        assert!(!is_valid_login("x/../../etc"));
+        assert!(!is_valid_login("evil?size=1&"));
+        assert!(!is_valid_login(&"a".repeat(40)));
+    }
 
     #[test]
     fn parses_ssh_greeting_and_github_remotes() {

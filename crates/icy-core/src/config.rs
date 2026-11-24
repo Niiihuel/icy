@@ -1,6 +1,7 @@
 //! Persistent workspace configuration and user-editable JSNIR JSON themes
 //! (inspired by herdr's plain-file configuration in `~/.config/icy/`).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,7 +22,7 @@ pub struct CliConfig {
     pub description: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IcyConfig {
     pub theme: String,
@@ -30,9 +31,21 @@ pub struct IcyConfig {
     pub density: String,
     pub font_size: u16,
     pub tiling_mode: TilingMode,
+    /// niri layout options (default column width, center-focused-column, …).
+    #[serde(default)]
+    pub layout: crate::tiling::LayoutOptions,
     pub check_updates: bool,
     pub auto_restart_update: bool,
     pub clis: Vec<CliConfig>,
+    /// Project folders pinned in the sidebar (Antigravity "Projects"); sessions group under them.
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// Keyboard shortcut overrides (action id → chords); missing actions use their defaults.
+    #[serde(default)]
+    pub keybinds: crate::keybinds::Overrides,
+    /// Last used / preferred external IDE id (e.g. `"cursor"`, `"vscode"`, `"zed"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_editor: Option<String>,
 }
 
 impl Default for IcyConfig {
@@ -44,9 +57,13 @@ impl Default for IcyConfig {
             density: "comfortable".into(),
             font_size: 13,
             tiling_mode: TilingMode::Niri,
+            layout: Default::default(),
             check_updates: true,
             auto_restart_update: true,
             clis: default_clis(),
+            projects: Vec::new(),
+            keybinds: Default::default(),
+            preferred_editor: None,
         }
     }
 }
@@ -110,6 +127,20 @@ pub fn default_clis() -> Vec<CliConfig> {
     ]
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ThemeChartColors<T> {
+    pub input: Option<T>,
+    pub output: Option<T>,
+    pub sessions: Option<T>,
+    pub duration: Option<T>,
+    pub axis: Option<T>,
+    pub grid: Option<T>,
+    pub track: Option<T>,
+    pub heatmap: Vec<Option<T>>,
+    pub providers: BTreeMap<String, T>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeColorsHex {
@@ -124,6 +155,14 @@ pub struct ThemeColorsHex {
     pub text_muted: String,
     pub border: String,
     pub highlight: String,
+    /// Native text selection colour; absent derives from `highlight`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub charts: Option<ThemeChartColors<String>>,
+    /// Git graph lane colours, cycled by lane; empty keeps the built-in palette.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graph: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +179,12 @@ pub struct ThemeColorsRgba {
     pub text_muted: u32,
     pub border: u32,
     pub highlight: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub charts: Option<ThemeChartColors<u32>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub graph: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +195,10 @@ pub struct UserThemeFile {
     pub mode: String,
     pub author: String,
     pub colors: ThemeColorsHex,
+    /// Icon overrides: a glyph name (`git-branch`, `folder`, …) or `cli:<id>` mapped to an
+    /// SVG file (relative to the theme file) or inline `<svg …>` markup.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub icons: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -161,6 +210,24 @@ pub struct ResolvedTheme {
     pub author: String,
     pub path: String,
     pub colors: ThemeColorsRgba,
+    /// Icon overrides with file sources made absolute (inline SVG kept as is).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub icons: BTreeMap<String, String>,
+}
+
+/// Resolves theme icon sources: inline SVG stays, file paths become absolute against `dir`.
+pub fn resolve_icons(icons: &BTreeMap<String, String>, dir: &Path) -> BTreeMap<String, String> {
+    icons
+        .iter()
+        .map(|(name, source)| {
+            let source = if source.trim_start().starts_with('<') {
+                source.clone()
+            } else {
+                dir.join(source).display().to_string()
+            };
+            (name.clone(), source)
+        })
+        .collect()
 }
 
 pub fn parse_hex_rgba(raw: &str) -> Option<u32> {
@@ -190,6 +257,25 @@ pub fn parse_hex_rgba(raw: &str) -> Option<u32> {
 
 fn resolve_colors(hex: &ThemeColorsHex, fallback_dark: bool) -> ThemeColorsRgba {
     let d = |s: &str, fb: u32| parse_hex_rgba(s).unwrap_or(fb);
+    let charts = hex.charts.as_ref().map(|colors| {
+        let parse = |color: &Option<String>| color.as_deref().and_then(parse_hex_rgba);
+        ThemeChartColors {
+            input: parse(&colors.input),
+            output: parse(&colors.output),
+            sessions: parse(&colors.sessions),
+            duration: parse(&colors.duration),
+            axis: parse(&colors.axis),
+            grid: parse(&colors.grid),
+            track: parse(&colors.track),
+            heatmap: colors.heatmap.iter().take(6).map(parse).collect(),
+            providers: colors
+                .providers
+                .iter()
+                .filter_map(|(name, color)| Some((name.clone(), parse_hex_rgba(color)?)))
+                .collect(),
+        }
+    });
+    let graph: Vec<u32> = hex.graph.iter().filter_map(|c| parse_hex_rgba(c)).collect();
     if fallback_dark {
         ThemeColorsRgba {
             app_bg: d(&hex.app_bg, 0x0a0a_0aff),
@@ -203,6 +289,9 @@ fn resolve_colors(hex: &ThemeColorsHex, fallback_dark: bool) -> ThemeColorsRgba 
             text_muted: d(&hex.text_muted, 0x8a8a_8aff),
             border: d(&hex.border, 0xffff_ff1a),
             highlight: d(&hex.highlight, 0x3b82_f6ff),
+            selection: hex.selection.as_deref().and_then(parse_hex_rgba),
+            charts,
+            graph,
         }
     } else {
         ThemeColorsRgba {
@@ -217,6 +306,9 @@ fn resolve_colors(hex: &ThemeColorsHex, fallback_dark: bool) -> ThemeColorsRgba 
             text_muted: d(&hex.text_muted, 0x7171_7aff),
             border: d(&hex.border, 0x0000_001a),
             highlight: d(&hex.highlight, 0x2563_ebff),
+            selection: hex.selection.as_deref().and_then(parse_hex_rgba),
+            charts,
+            graph,
         }
     }
 }
@@ -273,7 +365,11 @@ fn builtin_theme_files() -> Vec<UserThemeFile> {
                 text_muted: "#8a8a8a".into(),
                 border: "#ffffff1a".into(),
                 highlight: "#3b82f6".into(),
+                selection: None,
+                charts: None,
+                graph: Vec::new(),
             },
+            icons: BTreeMap::new(),
         },
         UserThemeFile {
             id: "accordee-light".into(),
@@ -292,7 +388,11 @@ fn builtin_theme_files() -> Vec<UserThemeFile> {
                 text_muted: "#71717a".into(),
                 border: "#0000001a".into(),
                 highlight: "#2563eb".into(),
+                selection: None,
+                charts: None,
+                graph: Vec::new(),
             },
+            icons: BTreeMap::new(),
         },
         UserThemeFile {
             id: "tokyo-night".into(),
@@ -311,7 +411,11 @@ fn builtin_theme_files() -> Vec<UserThemeFile> {
                 text_muted: "#565f89".into(),
                 border: "#c0caf51c".into(),
                 highlight: "#7aa2f7".into(),
+                selection: None,
+                charts: None,
+                graph: Vec::new(),
             },
+            icons: BTreeMap::new(),
         },
         UserThemeFile {
             id: "catppuccin-mocha".into(),
@@ -330,7 +434,11 @@ fn builtin_theme_files() -> Vec<UserThemeFile> {
                 text_muted: "#7f849c".into(),
                 border: "#cdd6f41a".into(),
                 highlight: "#89b4fa".into(),
+                selection: None,
+                charts: None,
+                graph: Vec::new(),
             },
+            icons: BTreeMap::new(),
         },
     ]
 }
@@ -370,6 +478,7 @@ pub fn load_themes_from(dir: &Path) -> Vec<ResolvedTheme> {
                     author: parsed.author,
                     path: path.display().to_string(),
                     colors: resolve_colors(&parsed.colors, is_dark),
+                    icons: resolve_icons(&parsed.icons, path.parent().unwrap_or(dir)),
                 });
             }
         }
@@ -385,6 +494,7 @@ pub fn load_themes_from(dir: &Path) -> Vec<ResolvedTheme> {
                 author: preset.author,
                 path: String::new(),
                 colors: resolve_colors(&preset.colors, is_dark),
+                icons: BTreeMap::new(),
             });
         }
     }
@@ -398,6 +508,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn theme_icons_resolve_files_against_the_theme_dir_and_keep_inline_svg() {
+        let icons = BTreeMap::from([
+            ("folder".to_string(), "icons/folder.svg".to_string()),
+            (
+                "cli:claude".to_string(),
+                "<svg xmlns='http://www.w3.org/2000/svg'/>".to_string(),
+            ),
+        ]);
+        let resolved = resolve_icons(&icons, Path::new("/themes/mine"));
+        assert_eq!(
+            resolved["folder"],
+            Path::new("/themes/mine")
+                .join("icons/folder.svg")
+                .display()
+                .to_string()
+        );
+        assert_eq!(resolved["cli:claude"], icons["cli:claude"]);
+        let file: UserThemeFile = serde_json::from_str(
+            r##"{"id":"t","name":"T","mode":"dark","author":"a","colors":{"appBg":"#000","sidebarBg":"#000","sidebarActive":"#000","panelBg":"#000","cardBg":"#000","kbdBg":"#000","textPrimary":"#fff","textSecondary":"#fff","textMuted":"#fff","border":"#fff","highlight":"#fff"},"icons":{"folder":"f.svg"}}"##,
+        ).unwrap();
+        assert_eq!(file.icons["folder"], "f.svg");
+    }
+
+    #[test]
+    fn themes_resolve_partial_chart_palettes() {
+        let mut theme = serde_json::to_value(&builtin_theme_files()[0]).unwrap();
+        assert!(theme["colors"].get("charts").is_none());
+        theme["colors"]["charts"] = serde_json::json!({
+            "output": "#34a78ac0",
+            "grid": "invalid",
+            "heatmap": [null, "#234"],
+            "providers": { "openai": "#abc", "other": "invalid" }
+        });
+        let parsed: UserThemeFile = serde_json::from_value(theme).unwrap();
+        let resolved = resolve_colors(&parsed.colors, true);
+        let charts = resolved.charts.unwrap();
+        assert_eq!(charts.input, None);
+        assert_eq!(charts.output, Some(0x34a7_8ac0));
+        assert_eq!(charts.grid, None);
+        assert_eq!(charts.heatmap, vec![None, Some(0x2233_44ff)]);
+        assert_eq!(
+            charts.providers,
+            BTreeMap::from([("openai".into(), 0xaabb_ccff)])
+        );
+    }
+
+    #[test]
+    fn theme_selection_colour_is_optional() {
+        let mut theme = serde_json::to_value(&builtin_theme_files()[0]).unwrap();
+        theme["colors"]["selection"] = serde_json::json!("#11223344");
+        let parsed: UserThemeFile = serde_json::from_value(theme).unwrap();
+        assert_eq!(
+            resolve_colors(&parsed.colors, true).selection,
+            Some(0x1122_3344)
+        );
+        let parsed: UserThemeFile =
+            serde_json::from_value(serde_json::to_value(&builtin_theme_files()[0]).unwrap())
+                .unwrap();
+        assert_eq!(resolve_colors(&parsed.colors, true).selection, None);
+    }
+
+    #[test]
     fn parses_hex_colors_and_roundtrips_config() {
         assert_eq!(parse_hex_rgba("#0a0a0a"), Some(0x0a0a_0aff));
         assert_eq!(parse_hex_rgba("#ffffff1a"), Some(0xffff_ff1a));
@@ -409,11 +581,19 @@ mod tests {
         let cfg_path = dir.join("config.json");
         let cfg = IcyConfig {
             density: "compact".into(),
+            preferred_editor: Some("cursor".into()),
             ..IcyConfig::default()
         };
         save_config_to(&cfg_path, &cfg).expect("save config");
         let loaded = load_config_from(&cfg_path);
         assert_eq!(loaded.density, "compact");
+        assert_eq!(loaded.preferred_editor.as_deref(), Some("cursor"));
+
+        // Older configs without preferredEditor still deserialize cleanly.
+        let mut raw_val = serde_json::to_value(&cfg).unwrap();
+        raw_val.as_object_mut().unwrap().remove("preferredEditor");
+        let legacy: IcyConfig = serde_json::from_value(raw_val).unwrap();
+        assert_eq!(legacy.preferred_editor, None);
 
         let themes = load_themes_from(&dir.join("themes"));
         assert!(themes.iter().any(|t| t.id == "accordee-dark"));

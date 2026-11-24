@@ -1,185 +1,153 @@
-// Functional workspace sections: Files explorer, persistent Tasks To-do manager,
-// and Agent Usage Metrics dashboard (inspired by the user's Agent Usage reference).
+// Native JSNIR dashboard for local agent usage. It is a compositor window (`TileKind` "metrics"),
+// so it lays itself out from its own measured width, not from the window's.
 
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${bytes} B`;
+function MetricsText(props: {
+  children: Source<string>;
+  size?: number;
+  weight?: number;
+  color?: Source<number>;
+  style?: Style;
+  align?: TextAlign;
+}): Element {
+  return (
+    <Text
+      lines={1}
+      style={props.style}
+      align={props.align}
+      font={{
+        family: fontFamilies.sans,
+        size: props.size ?? typeScale.caption,
+        weight: props.weight ?? fontWeights.normal,
+      }}
+      paint={() => ({ color: props.color === undefined ? palette().textPrimary : read(props.color) })}
+    >
+      {props.children}
+    </Text>
+  );
 }
 
-function FilesView(): Element {
-  const files = () => filesState.value;
-  const parentSubdir = () => {
-    const sub = files().subdir;
-    if (!sub) return "";
-    const parts = sub.split("/").filter((p) => p.length > 0);
-    parts.pop();
-    return parts.join("/");
-  };
+// shortcut: one width for every Metrics window; two open at once (one per workspace) share it.
+const metricsViewWidth = signal(0);
 
+function metricsWidth(): number {
+  const measured = metricsViewWidth.value;
+  const available = measured > 0
+    ? measured
+    : viewportSize.value[0] - (sidebarCompact.value ? spacing.sidebarRail : spacing.sidebarWidth) - spacing.paneGap;
+  return Math.max(0, Math.min(metricsLayout.maxContentWidth, available - 2 * metricsLayout.padding));
+}
+
+function metricsCardsFit(count: number): boolean {
+  return metricsWidth() >= count * metricsLayout.cardMinWidth + (count - 1) * metricsLayout.gap;
+}
+
+function metricsPanelsFit(): boolean {
+  return metricsWidth() >= 2 * metricsLayout.panelMinWidth + metricsLayout.gap;
+}
+
+function metricsPanelWidth(): number {
+  return metricsPanelsFit() ? (metricsWidth() - metricsLayout.gap) / 2 : metricsWidth();
+}
+
+function metricsCardPaint(): Paint {
+  return {
+    radius: radii.lg,
+    background: palette().cardBg,
+    edge: palette().border,
+    edgeWidth: spacing.hairline,
+    hover: { edge: hoverBorder() },
+    transitions: [smoothTransition("edge", motion.fast)],
+  };
+}
+
+function scanMetrics(): void {
+  if (metricsScanState.value === "loading") return;
+  metricsScanState.value = "loading";
+  requestHost({ type: "scanUsage" });
+}
+
+// ---- Shared chart pieces ---------------------------------------------------------------------
+
+interface MetricsTipRow {
+  key: string;
+  label: string;
+  value: string;
+  color?: number;
+}
+
+type MetricsPointer = [id: number, x: number, y: number, width: number, height: number];
+let metricsPointerTarget: { id: number; position: Signal<MetricsPointer | null>; clear: () => void } | undefined;
+
+function updateMetricsPointer(pointer: MetricsPointer): void {
+  if (metricsPointerTarget?.id === pointer[0]) metricsPointerTarget.position.value = pointer;
+}
+
+function metricsTooltipHeight(rows: number): number {
+  const { tooltipPadding, tooltipRow } = metricsLayout;
+  return 2 * tooltipPadding + (rows + 1) * tooltipRow + rows * spacing.unit;
+}
+
+function metricsTooltipOffset(pointer: number, size: number, extent: number, afterPointer: boolean): number {
+  const gap = metricsLayout.tooltipOffset;
+  const position = afterPointer ? pointer + gap : pointer - gap - size;
+  return Math.round(Math.max(0, Math.min(position, extent - size)));
+}
+
+// ECharts-style tooltip: one card per chart that follows the pointer. It has no handlers and
+// no layer of its own, so it never steals the hover from the points under it.
+function MetricsTooltip(props: {
+  hover: ReturnType<typeof metricsHover>;
+  title: () => string;
+  rows: () => MetricsTipRow[];
+  preferAbove?: boolean;
+}): Element {
+  const { tooltipWidth, tooltipPadding, tooltipRow, tooltipOffset, mark } = metricsLayout;
+  const pointer = () => props.hover.pointer.value;
+  const rows = signal<MetricsTipRow[]>([]);
+  const placement = signal<[number, number, number]>([0, 0, tooltipWidth]);
+  let side: [boolean, boolean] | undefined;
+  effect(() => { rows.value = props.rows(); });
+  effect(() => {
+    const point = pointer();
+    if (!point) { side = undefined; return; }
+    const [, x, y, extentX, extentY] = point;
+    const width = Math.min(tooltipWidth, extentX);
+    const height = metricsTooltipHeight(rows.value.length);
+    // Choose the side once per hover. Clamp subsequent moves instead of jumping across the pointer.
+    side ??= [x + tooltipOffset + width <= extentX, !props.preferAbove && y + tooltipOffset + height <= extentY];
+    placement.value = [
+      metricsTooltipOffset(x, width, extentX, side[0]),
+      metricsTooltipOffset(y, height, extentY, side[1]),
+      width,
+    ];
+  });
   return (
     <Column
-      style={{
-        grow: 1,
-        minWidth: 0,
-        minHeight: 0,
-        padding: [16, 20, 16, 20],
-        gap: 14,
-      }}
-      paint={() => accordeeFadeUpMotion()}
+      style={() => ({
+        position: "absolute", left: 0, top: 0, width: placement.value[2], padding: tooltipPadding, gap: spacing.unit,
+      })}
+      paint={() => ({
+        x: placement.value[0],
+        y: placement.value[1],
+        opacity: pointer() ? 1 : 0,
+        radius: radii.lg,
+        background: metricsColors().tooltip,
+        edge: palette().border,
+        edgeWidth: spacing.hairline,
+        shadows: [shadows.popover],
+      })}
     >
-      <Row style={{ align: "center", justify: "between", gap: 10 }}>
-        <Column style={{ gap: 2 }}>
-          <Text
-            font={{
-              family: fontFamilies.sans,
-              size: typeScale.headingSm,
-              weight: fontWeights.semibold,
-            }}
-            paint={() => ({ color: palette().textPrimary })}
-          >
-            Workspace Files
-          </Text>
-          <Text
-            lines={1}
-            font={{ family: fontFamilies.mono, size: typeScale.tiny }}
-            paint={() => ({ color: palette().textMuted })}
-          >
-            {() => (files().subdir ? `${files().cwd}/${files().subdir}` : files().cwd)}
-          </Text>
-        </Column>
-
-        <Row style={{ gap: 6 }}>
-          <Show when={() => files().subdir.length > 0}>
-            {() => (
-              <SecondaryButton
-                label="Up"
-                height={28}
-                onPress={() => listFiles(parentSubdir())}
-              />
-            )}
-          </Show>
-          <SecondaryButton
-            label="Refresh"
-            height={28}
-            onPress={() => listFiles(files().subdir)}
-          />
-        </Row>
-      </Row>
-
-      {/* Recently detected clickable paths in active terminal */}
-      <Show when={() => detectedFilesCount() > 0} style={{ shrink: 0 }}>
-        {() => (
-          <Column
-            style={{ padding: [10, 12, 10, 12], gap: 6, shrink: 0 }}
-            paint={() => ({
-              radius: radii.lg,
-              background: palette().panelBg,
-              edge: palette().border,
-              edgeWidth: spacing.hairline,
-            })}
-          >
-            <Text
-              font={{
-                family: fontFamilies.sans,
-                size: typeScale.tiny,
-                weight: fontWeights.semibold,
-              }}
-              paint={() => ({ color: palette().textSecondary })}
-            >
-              Detected in terminal output (click to inspect)
-            </Text>
-            <For
-              each={detectedFilesList}
-              key={(lnk) => lnk.target}
-              style={{ direction: "row", gap: 6, clip: true }}
-            >
-              {(lnk) => (
-                <Box
-                  style={{ padding: [4, 8, 4, 8] }}
-                  onPress={() => openLink(lnk())}
-                  paint={() => ({
-                    radius: radii.md,
-                    background: accent().brandSoft,
-                    hover: { brightness: 1.15 },
-                  })}
-                >
-                  <Text
-                    font={{ family: fontFamilies.mono, size: typeScale.tiny }}
-                    paint={() => ({ color: accent().brandText })}
-                  >
-                    {() =>
-                      lnk().line ? `${lnk().target}:${lnk().line}` : lnk().target
-                    }
-                  </Text>
-                </Box>
-              )}
-            </For>
-          </Column>
-        )}
-      </Show>
-
-      {/* Directory listing */}
-      <For
-        each={() => files().entries}
-        key={(entry) => entry.path}
-        style={{ grow: 1, minHeight: 0, scroll: true, gap: 2 }}
-      >
-        {(entry) => (
-          <Row
-            style={() => ({
-              height: rowControlHeight() + 2,
-              padding: [0, 10, 0, 10],
-              align: "center",
-              justify: "between",
-              gap: 10,
-              shrink: 0,
-            })}
-            onPress={() => {
-              if (entry().isDir) {
-                listFiles(entry().path);
-              } else {
-                openLink({
-                  kind: "file",
-                  target: entry().path,
-                  line: 1,
-                  col: null,
-                  resolved: true,
-                });
-              }
-            }}
-            paint={() => ({
-              radius: radii.md,
-              hover: { background: palette().sidebarActive },
-              transitions: [smoothTransition("background", motion.fast)],
-            })}
-          >
-            <Row style={{ align: "center", gap: 8, grow: 1, minWidth: 0 }}>
-              <Glyph
-                name={() => (entry().isDir ? "folder" : "file-code")}
-                size={14}
-                color={() =>
-                  entry().isDir ? accent().brandText : palette().textSecondary
-                }
-              />
-              <Text
-                lines={1}
-                font={{
-                  family: fontFamilies.mono,
-                  size: typeScale.caption,
-                  weight: entry().isDir ? fontWeights.medium : fontWeights.normal,
-                }}
-                paint={() => ({ color: palette().textPrimary })}
-              >
-                {() => entry().name}
-              </Text>
-            </Row>
-            <Text
-              font={{ family: fontFamilies.mono, size: typeScale.micro }}
-              paint={() => ({ color: palette().textMuted })}
-            >
-              {() => (entry().isDir ? "dir" : formatBytes(entry().size))}
-            </Text>
+      <MetricsText size={typeScale.tiny} weight={fontWeights.medium} style={{ height: tooltipRow }}
+        color={() => palette().textSecondary}>{props.title}</MetricsText>
+      <For each={rows} key={(row) => row.key} style={{ gap: spacing.unit }}>
+        {(row) => (
+          <Row style={{ height: tooltipRow, gap: spacing.unit * 2, align: "center" }}>
+            <Box
+              style={{ width: mark, height: mark, shrink: 0 }}
+              paint={() => ({ radius: mark / 2, background: row().color ?? metricsColors().track })}
+            />
+            <MetricsText style={{ grow: 1, minWidth: 0 }} color={() => palette().textSecondary}>{() => row().label}</MetricsText>
+            <MetricsText weight={fontWeights.medium}>{() => row().value}</MetricsText>
           </Row>
         )}
       </For>
@@ -187,389 +155,1053 @@ function FilesView(): Element {
   );
 }
 
-function TasksView(): Element {
-  const draft = signal("");
-  const filter = signal<"all" | "open" | "done">("all");
-
-  const filtered = () => {
-    const items = tasksState.value;
-    if (filter.value === "open") return items.filter((t) => !t.done);
-    if (filter.value === "done") return items.filter((t) => t.done);
-    return items;
+// Keep one active point across the visual gutters between cells or segments.
+function metricsHover(data: () => MetricsDashboard) {
+  const hovered = signal(-1);
+  const shown = signal(0);
+  const pointer = signal<MetricsPointer | null>(null);
+  let chartId: number | undefined;
+  let leaveToken = 0;
+  const clear = () => {
+    ++leaveToken;
+    hovered.value = -1;
+    pointer.value = null;
+    if (metricsPointerTarget && metricsPointerTarget.id === chartId) {
+      metricsPointerTarget = undefined;
+      requestHost({ type: "metricsPointer", id: 0 });
+    }
   };
+  effect(() => { data(); clear(); });
+  onCleanup(clear);
+  return {
+    hovered,
+    shown,
+    pointer,
+    ref(id: number) { chartId = id; },
+    enter(index: number) {
+      if (chartId === undefined || index < 0) return;
+      ++leaveToken;
+      if (metricsPointerTarget?.id !== chartId) {
+        const previous = metricsPointerTarget;
+        metricsPointerTarget = { id: chartId, position: pointer, clear };
+        previous?.clear();
+        requestHost({ type: "metricsPointer", id: chartId });
+      }
+      hovered.value = index;
+      shown.value = index;
+    },
+    leave(index: number) {
+      // Moving between points can report the new enter before the old leave.
+      if (hovered.value !== index) return;
+      const token = ++leaveToken;
+      afterView(metricsLayout.tooltipLeaveDelay, () => {
+        if (token === leaveToken) clear();
+      });
+    },
+  };
+}
 
-  function submitDraft(): void {
-    const text = draft.value.trim();
-    if (!text) return;
-    addTask(text, "workspace");
-    draft.value = "";
-  }
+function MetricsLegendToggle(props: {
+  color: () => number;
+  on: Signal<boolean>;
+  other: Signal<boolean>;
+  children: string;
+}): Element {
+  return (
+    <Row
+      style={{ height: metricsLayout.toolSize, gap: spacing.unit * 1.5, align: "center", padding: [0, spacing.unit * 2, 0, spacing.unit * 2] }}
+      // ECharts legend: a click hides the series; the last visible one stays.
+      onPress={() => { if (!props.on.value || props.other.value) props.on.value = !props.on.value; }}
+      paint={() => ({
+        radius: radii.md,
+        hover: { background: rowHoverBackground() },
+        transitions: [smoothTransition("background", motion.fast)],
+      })}
+    >
+      <Box
+        style={{ width: metricsLayout.mark, height: metricsLayout.mark, shrink: 0 }}
+        paint={() => ({
+          radius: radii.xs,
+          background: props.on.value ? props.color() : metricsColors().track,
+          transitions: [smoothTransition("background", motion.fast)],
+        })}
+      />
+      <MetricsText size={typeScale.tiny} color={() => props.on.value ? palette().textSecondary : palette().textMuted}>
+        {props.children}
+      </MetricsText>
+    </Row>
+  );
+}
 
+function MetricsLegend(props: { color: Source<number>; children: Source<string> }): Element {
+  return (
+    <Row style={{ gap: spacing.unit * 1.5, align: "center", shrink: 0 }}>
+      <Box
+        style={{ width: metricsLayout.mark, height: metricsLayout.mark, shrink: 0 }}
+        paint={() => ({ background: read(props.color), radius: radii.xs })}
+      />
+      <MetricsText size={typeScale.tiny} color={() => metricsColors().axis}>{props.children}</MetricsText>
+    </Row>
+  );
+}
+
+function MetricsAxisText(props: { children: Source<string>; style?: Style; align?: TextAlign; color?: Source<number> }): Element {
+  return (
+    <Text
+      lines={1}
+      style={props.style}
+      align={props.align}
+      font={{ family: fontFamilies.sans, size: typeScale.tiny }}
+      paint={() => ({ color: props.color === undefined ? metricsColors().axis : read(props.color) })}
+    >
+      {props.children}
+    </Text>
+  );
+}
+
+function MetricsPanel(props: { title: string; summary: Source<string>; style?: () => Style; ref?: (id: number) => void; children: Children }): Element {
   return (
     <Column
-      style={{
-        grow: 1,
-        minWidth: 0,
-        minHeight: 0,
-        padding: [16, 20, 16, 20],
-        gap: 14,
-      }}
-      paint={() => accordeeFadeUpMotion()}
+      ref={props.ref}
+      style={() => ({ minWidth: 0, shrink: 0, ...props.style?.() })}
+      paint={metricsCardPaint}
     >
-      <Row style={{ align: "center", justify: "between" }}>
-        <Column style={{ gap: 2 }}>
-          <Text
-            font={{
-              family: fontFamilies.sans,
-              size: typeScale.headingSm,
-              weight: fontWeights.semibold,
-            }}
-            paint={() => ({ color: palette().textPrimary })}
-          >
-            Tasks & Agent To-dos
-          </Text>
-          <Text
-            font={{ family: fontFamilies.sans, size: typeScale.caption }}
-            paint={() => ({ color: palette().textMuted })}
-          >
-            {() => `${openTasksCount()} open · persisted in ~/.config/icy/tasks.json`}
-          </Text>
-        </Column>
-
-        <Row style={{ gap: 4 }}>
-          {(["all", "open", "done"] as const).map((kind) => (
-            <Box
-              style={{ height: 26, padding: [0, 10, 0, 10], align: "center", justify: "center" }}
-              onPress={() => {
-                filter.value = kind;
-              }}
-              paint={() => ({
-                radius: radii.md,
-                background: filter.value === kind ? palette().sidebarActive : 0,
-                hover: { background: palette().sidebarActive },
-              })}
-            >
-              <Text
-                font={{ family: fontFamilies.sans, size: typeScale.caption }}
-                paint={() => ({
-                  color:
-                    filter.value === kind ? palette().textPrimary : palette().textMuted,
-                })}
-              >
-                {kind}
-              </Text>
-            </Box>
-          ))}
-        </Row>
-      </Row>
-
-      {/* Add new task bar */}
       <Row
-        style={{ height: 36, padding: [0, 6, 0, 12], align: "center", gap: 8, shrink: 0 }}
-        paint={() => ({
-          radius: radii.lg,
-          background: palette().panelBg,
-          edge: palette().border,
-          edgeWidth: spacing.hairline,
-        })}
+        style={{
+          height: spacing.toolbar, padding: [0, metricsLayout.cardPadding, 0, metricsLayout.cardPadding],
+          gap: metricsLayout.gap, align: "center", justify: "between", shrink: 0,
+        }}
+        paint={() => ({ edge: palette().border, edgeWidth: spacing.hairline, edgeSides: [0, 0, 1, 0] })}
       >
-        <TextInput
-          style={{ grow: 1, height: 26, padding: [4, 0, 2, 0] }}
-          font={{ family: fontFamilies.sans, size: typeScale.label }}
-          placeholder="Add a task for your next agent run..."
-          placeholderColor={palette().textMuted}
-          onChange={(text) => {
-            draft.value = text;
-          }}
-          onSubmit={submitDraft}
-          paint={() => ({ color: palette().textPrimary })}
-        />
-        <PrimaryButton label="Add Task" height={26} onPress={submitDraft} />
+        <MetricsText size={typeScale.label} weight={fontWeights.medium} style={{ shrink: 0 }}>{props.title}</MetricsText>
+        <MetricsText size={typeScale.tiny} color={() => palette().textMuted}>{props.summary}</MetricsText>
       </Row>
+      {props.children}
+    </Column>
+  );
+}
 
-      {/* Task rows */}
-      <For
-        each={filtered}
-        key={(item) => item.id}
-        style={{ grow: 1, minHeight: 0, scroll: true, gap: 6 }}
-      >
-        {(item) => (
-          <Row
-            style={{
-              padding: [10, 12, 10, 12],
-              align: "center",
-              justify: "between",
-              gap: 10,
-              shrink: 0,
-            }}
-            paint={() => ({
-              radius: radii.lg,
-              background: palette().cardBg,
-              edge: palette().border,
-              edgeWidth: spacing.hairline,
-            })}
-          >
-            <Row
-              style={{ align: "center", gap: 10, grow: 1, minWidth: 0 }}
-              onPress={() => toggleTask(item().id)}
-            >
-              {/* Accordee checkbox */}
+// Half-width beside a sibling when both fit, full width otherwise.
+function metricsHalfStyle(): Style {
+  return metricsPanelsFit() ? { grow: 1, basis: 0 } : {};
+}
+
+// ---- Header ----------------------------------------------------------------------------------
+
+function MetricsHeader(props: { data: () => MetricsDashboard }): Element {
+  const filterLabel = () =>
+    configState.value.clis.find((cli) => cli.id === metricsAgent.value)?.name ?? "";
+  const subtitle = () => {
+    const status = metricsScanState.value;
+    if (!metricsUsageState.value) return status === "error" ? "Couldn’t read local usage" : "Reading local usage…";
+    if (status === "loading") return "Refreshing local usage…";
+    if (status === "error") return "Refresh failed · showing last scan";
+    const { start, today } = props.data();
+    return `${metricDateRange(start, today)} · Local history · UTC`;
+  };
+  return (
+    <Box
+      style={() => ({
+        direction: metricsCardsFit(2) ? "row" : "column",
+        align: metricsCardsFit(2) ? "center" : "start",
+        gap: metricsLayout.gap,
+        shrink: 0,
+      })}
+    >
+      <Column style={{ grow: 1, minWidth: 0, gap: spacing.unit }}>
+        <Row style={{ align: "center", gap: metricsLayout.gap }}>
+          <MetricsText size={typeScale.heading} weight={fontWeights.medium}>Agent usage</MetricsText>
+          <Show when={() => !!filterLabel()} style={{ minWidth: 0 }}>
+            {() => (
+              <HintTooltip label="Clear agent filter" side="bottom" style={{ minWidth: 0 }}>
+                <Row
+                  style={{
+                    height: metricsLayout.toolSize, align: "center", gap: spacing.unit, minWidth: 0,
+                    padding: [0, spacing.unit * 2, 0, spacing.unit * 2],
+                  }}
+                  onPress={() => { metricsAgent.value = ""; }}
+                  paint={() => ({
+                    radius: radii.md,
+                    background: accent().brandSoft,
+                    hover: { background: rowHoverBackground() },
+                    transitions: [smoothTransition("background", motion.fast)],
+                  })}
+                >
+                  <Image source={() => "cli:" + metricsAgent.value}
+                    style={{ width: metricsLayout.iconSize, height: metricsLayout.iconSize, shrink: 0 }} />
+                  <MetricsText style={{ minWidth: 0 }} color={() => accent().brandText}>{filterLabel}</MetricsText>
+                  <Glyph name="close" size={metricsLayout.iconSize} color={() => palette().textMuted} />
+                </Row>
+              </HintTooltip>
+            )}
+          </Show>
+        </Row>
+        <MetricsText color={() => palette().textMuted}>{subtitle}</MetricsText>
+      </Column>
+      <Row style={{ gap: spacing.unit, align: "center", shrink: 0 }}>
+        <SegmentedControl value={metricsPeriod}
+          choices={metricsPeriods.map((period, index) => ({ id: index, label: period.label }))} />
+        <IconButton size="sm"
+          icon="refresh"
+          label="Refresh local usage"
+          disabled={() => metricsScanState.value === "loading"}
+          onPress={scanMetrics}
+        />
+      </Row>
+    </Box>
+  );
+}
+
+// ---- KPI cards -------------------------------------------------------------------------------
+
+type MetricCardField = "input" | "output" | "sessions" | "duration";
+
+function MetricCard(props: {
+  label: string;
+  field: MetricCardField;
+  data: () => MetricsDashboard;
+  available: (totals: MetricTotals) => boolean;
+  format: (value: number) => string;
+  detail: (data: MetricsDashboard) => string;
+}): Element {
+  const values = () => props.data().totals;
+  const delta = () => props.available(values()) && props.available(props.data().previous)
+    ? metricDelta(values()[props.field], props.data().previous[props.field]) : "";
+  const peak = () => Math.max(1, ...props.data().buckets.map((bucket) => bucket[props.field]));
+  const color = () => metricsColors()[props.field];
+  return (
+    <Column
+      style={() => ({
+        grow: metricsCardsFit(2) ? 1 : 0,
+        basis: metricsCardsFit(2) ? 0 : undefined,
+        minWidth: 0, height: metricsLayout.cardHeight, shrink: 0,
+        padding: [
+          metricsLayout.cardVerticalPadding, metricsLayout.cardPadding,
+          metricsLayout.cardVerticalPadding, metricsLayout.cardPadding,
+        ],
+        gap: spacing.unit,
+      })}
+      paint={metricsCardPaint}
+    >
+      <Row style={{ align: "center", justify: "between", gap: spacing.unit, height: metricsLayout.toolSize }}>
+        <MetricsText size={typeScale.label} color={() => palette().textSecondary}>
+          {props.label}
+        </MetricsText>
+        <Show when={() => !!delta()} style={{ shrink: 0 }}>
+          {() => (
+            <HintTooltip label="Compared with the previous period" side="top">
               <Box
-                style={{ width: 16, height: 16, align: "center", justify: "center", shrink: 0 }}
-                paint={() => ({
-                  radius: 4,
-                  background: item().done ? accent().brand : 0,
-                  edge: item().done ? accent().brand : palette().border,
-                  edgeWidth: 1,
-                })}
+                style={{ padding: [spacing.unit / 2, spacing.unit * 1.5, spacing.unit / 2, spacing.unit * 1.5] }}
+                paint={() => ({ radius: radii.chip, background: palette().kbdBg })}
               >
-                <Show when={() => item().done}>
-                  {() => <Glyph name="check" size={11} color={() => accent().brandFg} />}
-                </Show>
+                <MetricsText size={typeScale.tiny} color={() => palette().textSecondary}>{delta}</MetricsText>
               </Box>
-              <Text
-                lines={1}
-                font={{ family: fontFamilies.sans, size: typeScale.label }}
-                paint={() => ({
-                  color: item().done ? palette().textMuted : palette().textPrimary,
-                })}
-              >
-                {() => item().title}
-              </Text>
-            </Row>
+            </HintTooltip>
+          )}
+        </Show>
+      </Row>
+      <MetricsText size={typeScale.display} weight={fontWeights.medium}>
+        {() => props.available(values()) ? props.format(values()[props.field]) : metricNoValue}
+      </MetricsText>
+      <MetricsText color={() => palette().textMuted}>{() => props.detail(props.data())}</MetricsText>
+      <Box style={{ grow: 1 }} />
+      <Column style={{ height: metricsLayout.sparkHeight, justify: "end", shrink: 0 }}>
+        <For
+          each={() => props.data().buckets}
+          key={(bucket) => bucket.start}
+          style={{
+            direction: "row", height: metricsLayout.sparkHeight, align: "end",
+            gap: spacing.unit / 2, minWidth: 0,
+          }}
+        >
+          {(bucket) => (
+            <Box
+              style={() => ({
+                grow: 1, basis: 0, minWidth: 0,
+                height: Math.round(metricsLayout.sparkHeight * bucket()[props.field] / peak()),
+              })}
+              paint={() => ({
+                background: color(),
+                radius: [radii.xs, radii.xs, 0, 0],
+                transitions: [smoothTransition("height", motion.panel)],
+              })}
+            />
+          )}
+        </For>
+        <Box style={{ height: spacing.hairline, shrink: 0 }} paint={() => ({ background: metricsColors().grid })} />
+      </Column>
+    </Column>
+  );
+}
 
-            <Row style={{ align: "center", gap: 8, shrink: 0 }}>
-              <CountPill count={() => item().tag} />
+function MetricsCards(props: { data: () => MetricsDashboard }): Element {
+  const pair = () => ({
+    direction: metricsCardsFit(2) ? "row" as const : "column" as const,
+    grow: metricsCardsFit(4) ? 1 : 0,
+    basis: metricsCardsFit(4) ? 0 : undefined,
+    minWidth: 0, gap: metricsLayout.gap,
+  });
+  const tokensReported = (totals: MetricTotals) => totals.calls > 0;
+  return (
+    <Box style={() => ({
+      direction: metricsCardsFit(4) ? "row" : "column", gap: metricsLayout.gap, shrink: 0,
+    })}>
+      <Box style={pair}>
+        <MetricCard
+          label="Input tokens" field="input" data={props.data} format={metricCompact} available={tokensReported}
+          detail={({ totals }) => totals.input > 0
+            ? `${Number((100 * totals.cached / totals.input).toFixed(1))}% from cache` : "Cached input included"}
+        />
+        <MetricCard
+          label="Output tokens" field="output" data={props.data} format={metricCompact} available={tokensReported}
+          detail={({ totals }) => totals.calls > 0 ? `${metricCompact(totals.output / totals.calls)} per model call` : "Model responses"}
+        />
+      </Box>
+      <Box style={pair}>
+        <MetricCard
+          label="Sessions" field="sessions" data={props.data} format={metricCount}
+          available={() => !!metricsUsageState.value &&
+            (!metricsAgent.value || props.data().agentTotals.has(metricsAgent.value))}
+          detail={({ activeDays }) => `${metricCount(activeDays)} active ${activeDays === 1 ? "day" : "days"}`}
+        />
+        <MetricCard
+          label="Agent time" field="duration" data={props.data} format={metricDuration}
+          available={(totals) => totals.timedTurns > 0}
+          detail={({ totals }) => totals.timedTurns > 0
+            ? `${metricCount(totals.timedTurns)} timed ${totals.timedTurns === 1 ? "turn" : "turns"}` : "Reported turn duration"}
+        />
+      </Box>
+    </Box>
+  );
+}
+
+// ---- Token volume ----------------------------------------------------------------------------
+
+type VolumeField = "input" | "output";
+
+function MetricsVolume(props: { data: () => MetricsDashboard }): Element {
+  const layout = metricsLayout;
+  const hover = metricsHover(props.data);
+  const visible: Record<VolumeField, Signal<boolean>> = { input: signal(true), output: signal(true) };
+  const plotHeight = layout.plotInputHeight + layout.plotOutputHeight;
+  const height = (field: VolumeField) => {
+    if (!visible[field].value) return 0;
+    const shared = visible[field === "input" ? "output" : "input"].value;
+    return !shared ? plotHeight : field === "input" ? layout.plotInputHeight : layout.plotOutputHeight;
+  };
+  const buckets = () => props.data().buckets;
+  const ticks = (field: VolumeField) => metricNiceScale(
+    Math.max(0, ...buckets().map((bucket) => bucket[field])),
+    Math.floor(height(field) / layout.gridSpacing),
+  );
+  const axisMax = (field: VolumeField) => { const all = ticks(field); return all[all.length - 1]; };
+  // Input rises from the baseline, output hangs below it.
+  const baseline = () => height("input");
+  const yOf = (field: VolumeField, value: number) => field === "input"
+    ? baseline() - height("input") * value / axisMax("input")
+    : baseline() + height("output") * value / axisMax("output");
+  const grid = () => (["input", "output"] as const).flatMap((field) => height(field) === 0 ? [] :
+    ticks(field)
+      // One baseline when both series share it.
+      .filter((tick) => tick > 0 || field === "input" || !visible.input.value)
+      .map((tick) => ({ key: `${field}:${tick}`, y: yOf(field, tick), label: metricCompact(tick), base: tick === 0 })));
+  const plotWidth = () => Math.max(1, metricsWidth() - 2 * layout.cardPadding - layout.plotScaleWidth - layout.gap);
+  const slot = () => plotWidth() / Math.max(1, buckets().length);
+  const barInset = () => Math.max(spacing.hairline, slot() * layout.barGapFraction);
+  const xLabels = () => {
+    const count = buckets().length;
+    const wanted = Math.max(2, Math.min(layout.axisLabels, Math.floor(plotWidth() / (layout.axisLabelWidth + spacing.unit * 4))));
+    const indexes = new Set<number>();
+    for (let i = 0; i < wanted; i++) indexes.add(Math.round((i * (count - 1)) / (wanted - 1)));
+    return [...indexes].filter((index) => index >= 0 && index < count);
+  };
+  const labelX = (index: number) => Math.max(0, Math.min(
+    (index + 0.5) * slot() - layout.axisLabelWidth / 2, plotWidth() - layout.axisLabelWidth));
+  const shownBucket = () => buckets()[Math.min(hover.shown.value, buckets().length - 1)];
+  const bucketLabel = (bucket: MetricBucket) => metricDateRange(bucket.start, bucket.end);
+  const tipRows = (): MetricsTipRow[] => {
+    const bucket = shownBucket();
+    if (!bucket) return [];
+    const colors = metricsColors();
+    return [
+      { key: "input", label: "Input", value: metricCompact(bucket.input), color: colors.input },
+      { key: "cached", label: "From cache", value: bucket.input ? `${Math.round((100 * bucket.cached) / bucket.input)}%` : metricNoValue },
+      { key: "output", label: "Output", value: metricCompact(bucket.output), color: colors.output },
+      { key: "calls", label: "Model calls", value: metricCount(bucket.calls) },
+      { key: "time", label: "Agent time", value: bucket.timedTurns ? metricDuration(bucket.duration) : metricNoValue },
+    ];
+  };
+  const summary = () => {
+    const { activeDays, step } = props.data();
+    return `${step > 1 ? `${step}-day buckets` : "Daily"} · ${activeDays} active ${activeDays === 1 ? "day" : "days"}`;
+  };
+
+  return (
+    <MetricsPanel title="Token volume" summary={summary}>
+      <Column ref={hover.ref} style={{ padding: layout.cardPadding, gap: spacing.unit * 3 }}>
+        <Row style={{ gap: spacing.unit, align: "center", margin: [0, 0, 0, -spacing.unit * 2] }}>
+          <MetricsLegendToggle color={() => metricsColors().input} on={visible.input} other={visible.output}>Input</MetricsLegendToggle>
+          <MetricsLegendToggle color={() => metricsColors().output} on={visible.output} other={visible.input}>Output</MetricsLegendToggle>
+          <MetricsAxisText style={{ grow: 1, minWidth: 0 }} align="end">Independent scales</MetricsAxisText>
+        </Row>
+        <Row style={{ gap: layout.gap, align: "start" }}>
+          {/* Y axis: one label per gridline. */}
+          <For each={grid} key={(line) => line.key}
+            style={{ width: layout.plotScaleWidth, height: plotHeight, shrink: 0 }}>
+            {(line) => (
+              <Box style={() => ({
+                position: "absolute", left: 0, width: layout.plotScaleWidth,
+                top: Math.round(Math.max(0, Math.min(plotHeight - layout.axisLabelHeight, line().y - layout.axisLabelHeight / 2))),
+              })}>
+                <MetricsAxisText align="end">{() => line().label}</MetricsAxisText>
+              </Box>
+            )}
+          </For>
+          <Column style={{ grow: 1, minWidth: 0, gap: spacing.unit * 2 }}>
+            <Box style={{ height: plotHeight }}>
+              {/* Axis pointer: a shaded band behind the pointed bucket. */}
               <Box
-                style={{ width: 22, height: 22, align: "center", justify: "center" }}
-                onPress={() => deleteTask(item().id)}
+                style={() => ({ position: "absolute", left: 0, top: 0, width: slot(), height: plotHeight })}
                 paint={() => ({
+                  x: slot() * hover.shown.value,
+                  opacity: hover.hovered.value >= 0 ? 1 : 0,
                   radius: radii.sm,
-                  hover: { background: palette().sidebarActive },
+                  background: withAlpha(palette().textMuted, layout.pointerMix),
+                  transitions: [smoothTransition("x", motion.base), smoothTransition("opacity", motion.fast)],
+                })}
+              />
+              <For each={grid} key={(line) => line.key} style={() => ({ position: "absolute", left: 0, top: 0, width: plotWidth(), height: plotHeight })}>
+                {(line) => (
+                  <Box
+                    style={() => ({ position: "absolute", left: 0, top: Math.round(line().y), width: plotWidth(), height: spacing.hairline })}
+                    paint={() => ({ background: line().base ? metricsColors().axis : metricsColors().grid, opacity: line().base ? 0.5 : 1 })}
+                  />
+                )}
+              </For>
+              <For each={buckets} key={(bucket) => bucket.start}
+                style={() => ({ direction: "row", position: "absolute", left: 0, top: 0, width: plotWidth(), height: plotHeight })}>
+                {(bucket) => {
+                  const index = () => buckets().indexOf(bucket());
+                  const dimmed = () => hover.hovered.value >= 0 && hover.hovered.value !== index();
+                  const bar = (field: VolumeField) => {
+                    const fade = (color: number) => withAlpha(color, layout.barFade);
+                    return (
+                      <Box
+                        style={() => ({
+                          height: Math.round(height(field) * bucket()[field] / axisMax(field)),
+                          margin: [0, barInset(), 0, barInset()],
+                        })}
+                        paint={() => {
+                          const color = metricsColors()[field];
+                          return {
+                            radius: field === "input" ? [radii.xs, radii.xs, 0, 0] : [0, 0, radii.xs, radii.xs],
+                            // Strongest at the tip, fading toward the baseline.
+                            gradient: field === "input" ? [color, fade(color)] : [fade(color), color],
+                            opacity: dimmed() ? layout.blurOpacity : 1,
+                            starting: { opacity: 0 },
+                            transitions: [smoothTransition("height", motion.panel), smoothTransition("opacity", motion.fast)],
+                          };
+                        }}
+                      />
+                    );
+                  };
+                  return (
+                    <Column
+                      style={{ grow: 1, basis: 0, minWidth: 0, height: plotHeight }}
+                      onHover={(inside) => (inside ? hover.enter(index()) : hover.leave(index()))}
+                    >
+                      <Column style={() => ({ height: height("input"), justify: "end" })}>{bar("input")}</Column>
+                      <Column style={() => ({ height: height("output") })}>{bar("output")}</Column>
+                    </Column>
+                  );
+                }}
+              </For>
+            </Box>
+            {/* X axis, with the pointed bucket's date in a pill that follows the pointer. */}
+            <Box style={{ height: layout.axisLabelHeight + spacing.unit }}>
+              <For each={xLabels} key={(index) => index} style={() => ({ position: "absolute", left: 0, top: 0, width: plotWidth() })}>
+                {(index) => (
+                  <Box style={() => ({ position: "absolute", top: 0, left: labelX(index()), width: layout.axisLabelWidth })}>
+                    <MetricsAxisText align="center">
+                      {() => { const bucket = buckets()[index()]; return bucket ? metricDate(bucket.start) : ""; }}
+                    </MetricsAxisText>
+                  </Box>
+                )}
+              </For>
+              <Box
+                style={{ position: "absolute", left: 0, top: -spacing.unit / 2, width: layout.axisLabelWidth, height: layout.axisLabelHeight + spacing.unit, align: "center", justify: "center" }}
+                paint={() => ({
+                  x: labelX(hover.shown.value),
+                  opacity: hover.hovered.value >= 0 ? 1 : 0,
+                  radius: radii.sm,
+                  background: palette().tooltipBg,
+                  transitions: [smoothTransition("x", motion.base), smoothTransition("opacity", motion.fast)],
                 })}
               >
-                <Glyph name="trash" size={12} color={() => palette().textMuted} />
+                <MetricsAxisText align="center" color={() => palette().tooltipFg}>
+                  {() => { const bucket = shownBucket(); return bucket ? metricDate(bucket.start) : ""; }}
+                </MetricsAxisText>
               </Box>
+            </Box>
+          </Column>
+        </Row>
+        <MetricsTooltip
+          hover={hover}
+          title={() => { const bucket = shownBucket(); return bucket ? bucketLabel(bucket) : ""; }}
+          rows={tipRows}
+        />
+      </Column>
+    </MetricsPanel>
+  );
+}
+
+// ---- Peak activity ---------------------------------------------------------------------------
+
+function MetricsActivity(props: { data: () => MetricsDashboard }): Element {
+  const layout = metricsLayout;
+  const hover = metricsHover(props.data);
+  const halfGap = layout.heatmapGap / 2;
+  const count = (index: number) => props.data().hours[index];
+  const total = () => props.data().hours.reduce((sum, value) => sum + value, 0);
+  const hourLabel = (hour: number) => String(hour).padStart(2, "0");
+  const intensity = (index: number) => Math.ceil(5 * count(index) / Math.max(1, count(props.data().peak)));
+  const gridWidth = () => metricsPanelWidth() - 2 * layout.cardPadding;
+  const cellWidth = () => (gridWidth() - layout.heatmapLabelWidth - 24 * layout.heatmapGap) / 24;
+  const cellX = (hour: number) => layout.heatmapLabelWidth + layout.heatmapGap + hour * (cellWidth() + layout.heatmapGap);
+  const hoveredRow = () => hover.hovered.value < 0 ? -1 : Math.floor(hover.hovered.value / 24);
+  const caption = () => {
+    const peak = props.data().peak;
+    if (count(peak) === 0) return "No model calls";
+    return `Peak ${metricWeekdays[Math.floor(peak / 24)]} ${hourLabel(peak % 24)}:00 · ${metricCount(count(peak))} calls`;
+  };
+  return (
+    <MetricsPanel title="Peak activity" summary="Model calls · UTC" style={metricsHalfStyle}>
+      <Column ref={hover.ref} style={{ padding: layout.cardPadding, gap: spacing.unit * 3 }}>
+        <Column>
+          {metricWeekdays.map((weekday, row) => (
+            <Row style={{ align: "center" }}>
+              <MetricsAxisText style={{ width: layout.heatmapLabelWidth + layout.heatmapGap, shrink: 0 }}
+                color={() => hoveredRow() === row ? palette().textPrimary : metricsColors().axis}>{weekday}</MetricsAxisText>
+              {metricHours.map((hour) => {
+                const index = row * 24 + hour;
+                return (
+                  <Column
+                    // Split each gutter across adjacent hit targets, leaving only the inner cells painted.
+                    style={{ grow: 1, basis: 0, minWidth: 0, padding: [
+                      row === 0 ? 0 : halfGap, hour === metricHours.length - 1 ? 0 : halfGap,
+                      row === metricWeekdays.length - 1 ? 0 : halfGap, hour === 0 ? 0 : halfGap,
+                    ] }}
+                    onHover={(inside) => (inside ? hover.enter(index) : hover.leave(index))}
+                  >
+                    <Box
+                      style={{ height: layout.heatmapCellHeight }}
+                      paint={() => ({
+                        radius: radii.xs,
+                        background: metricsHeatColor(intensity(index)),
+                        edge: hover.hovered.value === index ? palette().textPrimary : 0,
+                        edgeWidth: spacing.hairline * 2,
+                        transitions: [smoothTransition("edge", motion.fast)],
+                      })}
+                    />
+                  </Column>
+                );
+              })}
             </Row>
+          ))}
+          <Box style={{ height: layout.axisLabelHeight, margin: [spacing.unit + layout.heatmapGap, 0, 0, 0] }}>
+            {[0, 6, 12, 18].map((hour) => (
+              <Box style={() => ({ position: "absolute", top: 0, left: cellX(hour) })}>
+                <MetricsAxisText
+                  color={() => hover.hovered.value >= 0 && hover.hovered.value % 24 === hour ? palette().textPrimary : metricsColors().axis}>
+                  {hourLabel(hour)}
+                </MetricsAxisText>
+              </Box>
+            ))}
+          </Box>
+        </Column>
+        <Row style={{ align: "center", justify: "between", gap: spacing.unit }}>
+          <MetricsAxisText style={{ minWidth: 0 }}>{caption}</MetricsAxisText>
+          <Row style={{ gap: spacing.unit / 2, align: "center", shrink: 0 }}>
+            <MetricsAxisText>Less</MetricsAxisText>
+            {[0, 1, 2, 3, 4, 5].map((level) => (
+              <Box
+                style={{ width: layout.mark, height: layout.mark }}
+                paint={() => ({ radius: radii.xs, background: metricsHeatColor(level) })}
+              />
+            ))}
+            <MetricsAxisText>More</MetricsAxisText>
           </Row>
+        </Row>
+        <MetricsTooltip
+          hover={hover}
+          title={() => {
+            const index = hover.shown.value;
+            const hour = index % 24;
+            return `${metricWeekdays[Math.floor(index / 24)]} · ${hourLabel(hour)}:00–${hourLabel((hour + 1) % 24)}:00`;
+          }}
+          rows={() => {
+            const calls = count(hover.shown.value);
+            return [
+              { key: "calls", label: "Model calls", value: metricCount(calls), color: metricsHeatColor(intensity(hover.shown.value)) },
+              { key: "share", label: "Share of period", value: total() ? `${Number((100 * calls / total()).toFixed(1))}%` : metricNoValue },
+            ];
+          }}
+        />
+      </Column>
+    </MetricsPanel>
+  );
+}
+
+// ---- Tables ----------------------------------------------------------------------------------
+
+function MetricsTableNumber(props: { children: Source<string>; heading?: boolean; color?: () => number }): Element {
+  return (
+    <MetricsText
+      align="end" style={{ width: metricsLayout.tableNumber, shrink: 0 }}
+      color={() => props.heading ? palette().textMuted : props.color?.() ?? palette().textPrimary}
+      size={props.heading ? typeScale.tiny : typeScale.caption}
+    >
+      {props.children}
+    </MetricsText>
+  );
+}
+
+function metricsTableRowStyle(): Style {
+  return {
+    height: densityMode.value === "compact" ? metricsLayout.tableRowCompact : metricsLayout.tableRow,
+    direction: "row", minWidth: 0, gap: spacing.unit * 2, align: "center", shrink: 0,
+    padding: [0, metricsLayout.cardPadding, 0, metricsLayout.cardPadding],
+  };
+}
+
+function metricsTableRowPaint(selected = false, hoverable = true): Paint {
+  return {
+    edge: palette().border,
+    edgeWidth: spacing.hairline,
+    edgeSides: [0, 0, 1, 0],
+    background: selected ? accent().brandSoft : 0,
+    hover: hoverable && !selected ? { background: rowHoverBackground() } : undefined,
+    transitions: [smoothTransition("background", motion.fast)],
+  };
+}
+
+function MetricsShare(props: { share: () => number; color: () => number }): Element {
+  const width = metricsLayout.shareBarWidth;
+  return (
+    <Row style={{ gap: spacing.unit * 2, align: "center", shrink: 0 }}>
+      <Box
+        style={{ width, height: metricsLayout.inlineBarHeight }}
+        paint={() => ({ radius: radii.sm, background: metricsColors().track })}
+      >
+        <Box
+          style={() => ({ width: Math.max(spacing.hairline * 2, Math.round(width * props.share())), height: metricsLayout.inlineBarHeight })}
+          paint={() => ({ radius: radii.sm, background: props.color(), transitions: [smoothTransition("width", motion.panel)] })}
+        />
+      </Box>
+      <MetricsText align="end" style={{ width: spacing.unit * 9 }} color={() => palette().textSecondary}>
+        {() => props.share() < 0.01 ? "<1%" : `${Math.round(100 * props.share())}%`}
+      </MetricsText>
+    </Row>
+  );
+}
+
+function MetricsProviderShare(props: { data: () => MetricsDashboard; hover: ReturnType<typeof metricsHover> }): Element {
+  const percent = (share: number) => share < 0.01 ? "<1%" : `${Math.round(100 * share)}%`;
+  return (
+    <Show when={() => props.data().providers.length > 0}>
+      {() => (
+        <Column
+          style={{
+            padding: [metricsLayout.cardVerticalPadding, metricsLayout.cardPadding, metricsLayout.cardVerticalPadding, metricsLayout.cardPadding],
+            gap: spacing.unit * 3,
+          }}
+          paint={() => ({ edge: palette().border, edgeWidth: spacing.hairline, edgeSides: [0, 0, 1, 0] })}
+        >
+          <For
+            each={() => props.data().providers}
+            key={(provider) => provider.id}
+            style={{ direction: "row", height: metricsLayout.mark, gap: spacing.hairline * 2, minWidth: 0 }}
+          >
+            {(provider) => {
+              const index = () => props.data().providers.indexOf(provider());
+              return (
+                <Box
+                  style={() => ({ grow: provider().share, basis: 0, minWidth: spacing.unit })}
+                  onHover={(inside) => inside ? props.hover.enter(index()) : props.hover.leave(index())}
+                  paint={() => ({
+                    radius: radii.xs,
+                    background: metricsProviderColor(provider().id),
+                    brightness: props.hover.hovered.value === index() ? metricsLayout.providerHoverBrightness : 1,
+                  })}
+                />
+              );
+            }}
+          </For>
+          <For
+            each={() => props.data().providers}
+            key={(provider) => provider.id}
+            style={{ direction: "row", gap: metricsLayout.gap * 1.5, align: "center" }}
+          >
+            {(provider) => (
+              <MetricsLegend color={() => metricsProviderColor(provider().id)}>
+                {() => `${metricProviderNames[provider().id]} ${percent(provider().share)}`}
+              </MetricsLegend>
+            )}
+          </For>
+        </Column>
+      )}
+    </Show>
+  );
+}
+
+function MetricsModels(props: { data: () => MetricsDashboard }): Element {
+  const hover = metricsHover(props.data);
+  const shownProvider = () => props.data().providers[hover.shown.value];
+  const expanded = signal(false);
+  const visibleModels = metricsLayout.maxVisibleModels;
+  const showShare = () => metricsWidth() >= metricsLayout.shareColumnMin;
+  const totalInput = () => props.data().ranked.reduce((sum, model) => sum + model.tokens.input, 0);
+  return (
+    <MetricsPanel title="Models" summary={() => `${props.data().ranked.length} recorded`} ref={hover.ref}>
+      <MetricsProviderShare data={props.data} hover={hover} />
+      <Box style={metricsTableRowStyle} paint={() => metricsTableRowPaint(false, false)}>
+        <MetricsText style={{ grow: 1, minWidth: 0 }} color={() => palette().textMuted} size={typeScale.tiny}>Model</MetricsText>
+        <Show when={showShare} style={{ shrink: 0 }}>
+          {() => <MetricsText style={{ width: metricsLayout.shareBarWidth + spacing.unit * 11 }} color={() => palette().textMuted} size={typeScale.tiny}>Input share</MetricsText>}
+        </Show>
+        <MetricsTableNumber heading>Input</MetricsTableNumber>
+        <MetricsTableNumber heading>Cached</MetricsTableNumber>
+        <MetricsTableNumber heading>Output</MetricsTableNumber>
+        <MetricsTableNumber heading>Calls</MetricsTableNumber>
+      </Box>
+      <For
+        each={() => expanded.value ? props.data().ranked : props.data().ranked.slice(0, visibleModels)}
+        key={metricModelKey}
+      >
+        {(model) => (
+          <Box style={metricsTableRowStyle} paint={() => metricsTableRowPaint()}>
+            <Row style={{ grow: 1, minWidth: 0, gap: spacing.unit * 2, align: "center" }}>
+              <Box
+                style={{ width: metricsLayout.mark, height: metricsLayout.mark, shrink: 0 }}
+                paint={() => ({ radius: radii.xs, background: metricsProviderColor(model().provider) })}
+              />
+              <MetricsText style={{ minWidth: 0 }}>{() => model().name}</MetricsText>
+              <MetricsText style={{ minWidth: 0, shrink: 0 }} size={typeScale.tiny} color={() => palette().textMuted}>
+                {() => metricProviderNames[model().provider]}
+              </MetricsText>
+            </Row>
+            <Show when={showShare} style={{ shrink: 0 }}>
+              {() => (
+                <MetricsShare
+                  share={() => totalInput() ? model().tokens.input / totalInput() : 0}
+                  color={() => metricsProviderColor(model().provider)}
+                />
+              )}
+            </Show>
+            <MetricsTableNumber>{() => metricCompact(model().tokens.input)}</MetricsTableNumber>
+            <MetricsTableNumber color={() => palette().textSecondary}>{() => metricCompact(model().tokens.cached)}</MetricsTableNumber>
+            <MetricsTableNumber>{() => metricCompact(model().tokens.output)}</MetricsTableNumber>
+            <MetricsTableNumber color={() => palette().textSecondary}>{() => metricCompact(model().tokens.calls)}</MetricsTableNumber>
+          </Box>
         )}
       </For>
+      <Show when={() => !props.data().ranked.length}>
+        {() => <EmptyState compact title="No model records in this period." style={{ padding: metricsLayout.cardPadding }} />}
+      </Show>
+      <Show when={() => props.data().ranked.length > visibleModels}>
+        {() => (
+          <Row
+            style={() => ({ ...metricsTableRowStyle(), gap: spacing.unit * 1.5 })}
+            onPress={() => { expanded.value = !expanded.value; }}
+            paint={() => ({
+              radius: [0, 0, radii.lg, radii.lg],
+              hover: { background: rowHoverBackground() },
+              transitions: [smoothTransition("background", motion.fast)],
+            })}
+          >
+            <Glyph name="chevrons-up-down" size={metricsLayout.iconSize} color={() => palette().textMuted} />
+            <MetricsText color={() => palette().textSecondary}>
+              {() => expanded.value ? "Show fewer models" : `Show ${props.data().ranked.length - visibleModels} more models`}
+            </MetricsText>
+          </Row>
+        )}
+      </Show>
+      <MetricsTooltip hover={hover} preferAbove
+        title={() => { const provider = shownProvider(); return provider ? metricProviderNames[provider.id] : ""; }}
+        rows={() => {
+          const provider = shownProvider();
+          return provider ? [{
+            key: "input", label: "Input share",
+            value: `${Math.round(100 * provider.share)}% · ${metricCompact(provider.input)}`,
+            color: metricsProviderColor(provider.id),
+          }] : [];
+        }}
+      />
+    </MetricsPanel>
+  );
+}
+
+function MetricsAgents(props: { data: () => MetricsDashboard }): Element {
+  const activeAgents = () => [...props.data().agentTotals.values()].filter((agent) => agent.sessions > 0).length;
+  const peakInput = () => Math.max(1, ...[...props.data().agentTotals.values()].map((agent) => agent.input));
+  return (
+    <MetricsPanel title="Agents" summary={() => `${activeAgents()} active in this period`} style={metricsHalfStyle}>
+      <Box style={metricsTableRowStyle} paint={() => metricsTableRowPaint(false, false)}>
+        <MetricsText style={{ grow: 1, minWidth: 0 }} color={() => palette().textMuted} size={typeScale.tiny}>Agent</MetricsText>
+        <MetricsTableNumber heading>Input</MetricsTableNumber>
+        <MetricsTableNumber heading>Output</MetricsTableNumber>
+        <MetricsTableNumber heading>Time</MetricsTableNumber>
+        <Box style={{ width: metricsLayout.toolSize, shrink: 0 }} />
+      </Box>
+      <For each={() => configState.value.clis} key={(cli) => cli.id}>
+        {(cli) => {
+          const selected = () => metricsAgent.value === cli().id;
+          const totals = () => props.data().agentTotals.get(cli().id);
+          const input = () => totals()?.input ?? 0;
+          const tokens = (field: "input" | "output") => {
+            const row = totals();
+            return row?.calls ? metricCompact(row[field]) : metricNoValue;
+          };
+          const time = () => {
+            const row = totals();
+            return row?.timedTurns ? metricDuration(row.duration) : metricNoValue;
+          };
+          const tracked = () => !!totals()?.calls || !!totals()?.sessions;
+          return (
+            <Box
+                style={metricsTableRowStyle}
+                // The whole row filters the dashboard; the launch button keeps its own press.
+                onPress={() => { metricsAgent.value = selected() ? "" : cli().id; }}
+                paint={() => metricsTableRowPaint(selected())}
+              >
+                <Row style={{ grow: 1, minWidth: 0, gap: spacing.unit * 2, align: "center" }}>
+                  <Image source={() => "cli:" + cli().id}
+                    style={{ width: spacing.unit * 4, height: spacing.unit * 4, shrink: 0 }}
+                    paint={() => ({ opacity: tracked() ? 1 : controlState.disabledOpacity })} />
+                  <MetricsText style={{ grow: 1, minWidth: 0 }}
+                    color={() => selected() ? accent().brandText : tracked() ? palette().textPrimary : palette().textMuted}>
+                    {() => cli().name}
+                  </MetricsText>
+                  <Show when={() => metricsPanelWidth() >= metricsLayout.inlineBarPanelMin} style={{ shrink: 0 }}>
+                    {() => (
+                      <Box
+                        style={{ width: metricsLayout.inlineBarWidth, height: metricsLayout.inlineBarHeight }}
+                        paint={() => ({ radius: radii.sm, background: input() ? metricsColors().track : 0 })}
+                      >
+                        <Box
+                          style={() => ({
+                            width: Math.round(metricsLayout.inlineBarWidth * input() / peakInput()),
+                            height: metricsLayout.inlineBarHeight,
+                          })}
+                          paint={() => ({
+                            radius: radii.sm,
+                            background: metricsColors().input,
+                            transitions: [smoothTransition("width", motion.panel)],
+                          })}
+                        />
+                      </Box>
+                    )}
+                  </Show>
+                </Row>
+                <MetricsTableNumber>{() => tokens("input")}</MetricsTableNumber>
+                <MetricsTableNumber>{() => tokens("output")}</MetricsTableNumber>
+                <MetricsTableNumber>{time}</MetricsTableNumber>
+                <IconButton size="sm"
+                  icon="square-terminal" label={() => `Launch ${cli().name}`}
+                  disabled={() => !cli().enabled} onPress={() => launchCli(cli().id)}
+                />
+              </Box>
+          );
+        }}
+      </For>
+    </MetricsPanel>
+  );
+}
+
+// ---- Loading and empty states ----------------------------------------------------------------
+
+function metricsSkeletonPaint(radius: number = radii.sm): Paint {
+  return skeletonPaint(metricsColors().track, radius);
+}
+
+function MetricsSkeletonBlock(props: { width?: number; height: number; grow?: boolean }): Element {
+  return (
+    <Box
+      style={{ width: props.width, height: props.height, grow: props.grow ? 1 : 0, basis: props.grow ? 0 : undefined, minWidth: 0, shrink: 0 }}
+      paint={() => metricsSkeletonPaint()}
+    />
+  );
+}
+
+// Fixed pseudo-random bar heights, so the placeholder reads as a chart without jumping around.
+function metricsSkeletonBars(count: number, height: number): Element {
+  return (
+    <Row style={{ height, align: "end", gap: spacing.unit, minWidth: 0 }}>
+      {Array.from({ length: count }, (_, index) => (
+        <MetricsSkeletonBlock grow height={Math.round(height * (0.25 + 0.7 * Math.abs(Math.sin(index * 1.7 + 0.4))))} />
+      ))}
+    </Row>
+  );
+}
+
+function MetricsSkeletonPanel(props: { title: string; style?: () => Style; children: Children }): Element {
+  return (
+    <MetricsPanel title={props.title} summary="" style={props.style}>
+      <Column style={{ padding: metricsLayout.cardPadding, gap: spacing.unit * 3 }}>{props.children}</Column>
+    </MetricsPanel>
+  );
+}
+
+function MetricsSkeletonRows(props: { count: number }): Element {
+  return (
+    <Column style={{ gap: spacing.unit * 3 }}>
+      {Array.from({ length: props.count }, () => (
+        <Row style={{ gap: spacing.unit * 3, align: "center" }}>
+          <MetricsSkeletonBlock width={spacing.unit * 4} height={spacing.unit * 4} />
+          <MetricsSkeletonBlock grow height={spacing.unit * 2.5} />
+          <MetricsSkeletonBlock width={metricsLayout.tableNumber} height={spacing.unit * 2.5} />
+          <MetricsSkeletonBlock width={metricsLayout.tableNumber} height={spacing.unit * 2.5} />
+        </Row>
+      ))}
+    </Column>
+  );
+}
+
+function MetricsSkeleton(): Element {
+  const layout = metricsLayout;
+  const card = () => (
+    <Column
+      style={() => ({
+        grow: 1, basis: 0, minWidth: 0, height: layout.cardHeight, gap: spacing.unit * 2.5,
+        padding: [layout.cardVerticalPadding, layout.cardPadding, layout.cardVerticalPadding, layout.cardPadding],
+      })}
+      paint={metricsCardPaint}
+    >
+      <MetricsSkeletonBlock width={spacing.unit * 20} height={spacing.unit * 3} />
+      <MetricsSkeletonBlock width={spacing.unit * 24} height={spacing.unit * 7} />
+      <MetricsSkeletonBlock width={spacing.unit * 28} height={spacing.unit * 2.5} />
+      <Box style={{ grow: 1 }} />
+      {metricsSkeletonBars(16, layout.sparkHeight - spacing.unit * 2)}
+    </Column>
+  );
+  return (
+    <Column style={{ gap: layout.gap, shrink: 0 }}>
+      <Box style={() => ({ direction: metricsCardsFit(4) ? "row" : "column", gap: layout.gap })}>
+        <Box style={() => ({ direction: metricsCardsFit(2) ? "row" : "column", grow: 1, basis: 0, gap: layout.gap })}>{card()}{card()}</Box>
+        <Box style={() => ({ direction: metricsCardsFit(2) ? "row" : "column", grow: 1, basis: 0, gap: layout.gap })}>{card()}{card()}</Box>
+      </Box>
+      <MetricsSkeletonPanel title="Token volume">
+        <Row style={{ gap: spacing.unit * 3 }}>
+          <MetricsSkeletonBlock width={spacing.unit * 12} height={spacing.unit * 3} />
+          <MetricsSkeletonBlock width={spacing.unit * 12} height={spacing.unit * 3} />
+        </Row>
+        {metricsSkeletonBars(layout.plotBars, layout.plotInputHeight + layout.plotOutputHeight)}
+      </MetricsSkeletonPanel>
+      <Box style={() => ({ direction: metricsPanelsFit() ? "row" : "column", gap: layout.gap })}>
+        <MetricsSkeletonPanel title="Peak activity" style={metricsHalfStyle}>
+          {Array.from({ length: 7 }, () => <MetricsSkeletonBlock height={layout.heatmapCellHeight} />)}
+        </MetricsSkeletonPanel>
+        <MetricsSkeletonPanel title="Agents" style={metricsHalfStyle}>
+          <MetricsSkeletonRows count={5} />
+        </MetricsSkeletonPanel>
+      </Box>
+      <MetricsSkeletonPanel title="Models">
+        <MetricsSkeletonBlock height={layout.mark} />
+        <MetricsSkeletonRows count={4} />
+      </MetricsSkeletonPanel>
+    </Column>
+  );
+}
+
+function MetricsError(): Element {
+  return (
+    <Column
+      style={{ padding: metricsLayout.cardPadding * 2, gap: spacing.unit * 3, align: "center", shrink: 0 }}
+      paint={metricsCardPaint}
+    >
+      <Glyph name="dashboard" size={metricsLayout.errorIcon} color={() => palette().textMuted} />
+      <MetricsText size={typeScale.body} weight={fontWeights.medium}>Couldn’t read local usage</MetricsText>
+      <MetricsText color={() => palette().textMuted}>The agents’ history files could not be scanned.</MetricsText>
+      <GhostButton icon="refresh" label="Try again" onPress={scanMetrics} />
+    </Column>
+  );
+}
+
+function MetricsBody(props: { data: () => MetricsDashboard }): Element {
+  const layout = metricsLayout;
+  return (
+    <Column
+      style={{ gap: layout.gap, shrink: 0 }}
+      // A refresh keeps the last scan on screen, dimmed until the new one lands.
+      paint={() => ({
+        opacity: metricsScanState.value === "loading" ? layout.refreshingOpacity : 1,
+        starting: { opacity: 0, y: 6 },
+        transitions: [smoothTransition("opacity", motion.enter), smoothTransition("y", motion.enter)],
+      })}
+    >
+      <MetricsCards data={props.data} />
+      <MetricsVolume data={props.data} />
+      <Box style={() => ({ direction: metricsPanelsFit() ? "row" : "column", gap: layout.gap, shrink: 0 })}>
+        <MetricsActivity data={props.data} />
+        <MetricsAgents data={props.data} />
+      </Box>
+      <MetricsModels data={props.data} />
     </Column>
   );
 }
 
 function MetricsView(): Element {
-  const activeClisCount = () =>
-    cliUsageState.value.filter((c) => c.sessions > 0).length;
-  const totalSessions = () =>
-    cliUsageState.value.reduce((acc, c) => acc + c.sessions, 0);
-
-  const kpiCard = (label: string, value: () => string, sub: () => string): Element => (
-    <Column
-      style={{ grow: 1, padding: [14, 16, 14, 16], gap: 4 }}
-      paint={() => ({
-        radius: radii.xl,
-        background: palette().cardBg,
-        edge: palette().border,
-        edgeWidth: spacing.hairline,
-        ...accordeeFadeUpMotion(),
-      })}
-    >
-      <Text
-        font={{
-          family: fontFamilies.sans,
-          size: typeScale.micro,
-          weight: fontWeights.semibold,
-        }}
-        paint={() => ({ color: palette().textMuted })}
-      >
-        {label}
-      </Text>
-      <Text
-        font={{
-          family: fontFamilies.sans,
-          size: typeScale.metric,
-          weight: fontWeights.semibold,
-        }}
-        paint={() => ({ color: palette().textPrimary })}
-      >
-        {value}
-      </Text>
-      <Text
-        font={{ family: fontFamilies.mono, size: typeScale.micro }}
-        paint={() => ({ color: palette().textSecondary })}
-      >
-        {sub}
-      </Text>
-    </Column>
-  );
-
+  const data = metricsDashboardSource();
+  if (metricsScanState.value === "idle") scanMetrics();
+  const viewWidth = signal(0);
+  const fadeHeight = signal(0);
+  let root: number | undefined;
+  const measure = () => {
+    const width = root === undefined ? 0 : jsnir.columns.width[root] ?? 0;
+    if (width > 0) {
+      viewWidth.value = width;
+      metricsViewWidth.value = width;
+    }
+  };
+  // The window resizes with the tiling (columns, splits, fullscreen) and the sidebar.
+  effect(() => {
+    void viewportSize.value;
+    void sidebarCompact.value;
+    void tilingState.value;
+    afterView(16, measure);
+    afterView(SPRING_MS + 40, measure);
+  });
+  const state = () => metricsUsageState.value !== null ? "ready" : metricsScanState.value === "error" ? "error" : "loading";
+  const column = () => ({ width: metricsWidth(), shrink: 0 });
   return (
     <Column
-      style={{
-        grow: 1,
-        minWidth: 0,
-        minHeight: 0,
-        scroll: true,
-        padding: [16, 20, 20, 20],
-        gap: 16,
-      }}
+      ref={(id) => { root = id; afterView(16, measure); }}
+      style={{ grow: 1, minWidth: 0, minHeight: 0, align: "stretch" }}
     >
-      <Row style={{ align: "center", justify: "between" }}>
-        <Column style={{ gap: 2 }}>
-          <Text
-            font={{
-              family: fontFamilies.sans,
-              size: typeScale.headingSm,
-              weight: fontWeights.semibold,
-            }}
-            paint={() => ({ color: palette().textPrimary })}
-          >
-            Agent Usage
-          </Text>
-          <Text
-            font={{ family: fontFamilies.sans, size: typeScale.caption }}
-            paint={() => ({ color: palette().textMuted })}
-          >
-            Live local telemetry scanned from Claude Code, Antigravity, Codex, Grok, Junie & OpenCode.
-          </Text>
+      <Row style={{ justify: "center", shrink: 0 }}>
+        <Box style={() => ({ ...column(), padding: [metricsLayout.padding, 0, metricsLayout.sectionGap, 0] })}>
+          <MetricsHeader data={data} />
+        </Box>
+      </Row>
+      <Column style={{ grow: 1, minWidth: 0, minHeight: 0, clip: true }}>
+        <Column
+          style={{ grow: 1, minWidth: 0, minHeight: 0, scroll: true, align: "center" }}
+          onScroll={({ top }) => { fadeHeight.value = Math.min(top, metricsLayout.scrollFadeHeight); }}
+        >
+          <Column style={() => ({ ...column(), padding: [0, 0, metricsLayout.padding, 0] })}>
+            <Dynamic value={state}>
+              {(current) => current === "ready" ? <MetricsBody data={data} />
+                : current === "error" ? <MetricsError /> : <MetricsSkeleton />}
+            </Dynamic>
+          </Column>
         </Column>
-        <CountPill count={() => `${tilingState.value.mode} tiling`} />
-      </Row>
-
-      {/* 4 KPI Summary Cards */}
-      <Row style={{ gap: 10, shrink: 0 }}>
-        {kpiCard(
-          "TOTAL CLI SESSIONS",
-          () => String(totalSessions()),
-          () => `${activeClisCount()} active providers`
-        )}
-        {kpiCard(
-          "LIVE TERMINALS",
-          () => String(sessionsState.value.items.length),
-          () => `${tilingState.value.totalCols} tiled columns`
-        )}
-        {kpiCard(
-          "OPEN TASKS",
-          () => String(openTasksCount()),
-          () => `${tasksState.value.length} total tracked`
-        )}
-        {kpiCard(
-          "ARCHIVED RUNS",
-          () => String(sessionsState.value.archivedCount),
-          () => (githubState.value.branch ? `branch ${githubState.value.branch}` : "local workspace")
-        )}
-      </Row>
-
-      {/* Per-Agent Breakdown with official SVGL logos + animated usage bars */}
-      <Column
-        style={{ padding: [16, 18, 16, 18], gap: 12, shrink: 0 }}
-        paint={() => ({
-          radius: radii.xl,
-          background: palette().cardBg,
-          edge: palette().border,
-          edgeWidth: spacing.hairline,
-        })}
-      >
-        <Row style={{ align: "center", justify: "between" }}>
-          <Text
-            font={{
-              family: fontFamilies.sans,
-              size: typeScale.caption,
-              weight: fontWeights.semibold,
-            }}
-            paint={() => ({ color: palette().textSecondary })}
-          >
-            AGENTS
-          </Text>
-          <Text
-            font={{ family: fontFamilies.mono, size: typeScale.micro }}
-            paint={() => ({ color: palette().textMuted })}
-          >
-            click any CLI to launch in a tiled column
-          </Text>
-        </Row>
-
-        <For each={() => cliUsageState.value} key={(cli) => cli.id} style={{ gap: 8 }}>
-          {(cli) => (
-            <Row
-              style={{
-                padding: [8, 10, 8, 10],
-                align: "center",
-                justify: "between",
-                gap: 12,
-              }}
-              onPress={() => launchCli(cli().id)}
-              paint={() => ({
-                radius: radii.md,
-                hover: { background: palette().sidebarActive },
-                transitions: [smoothTransition("background", motion.fast)],
-              })}
-            >
-              <Row style={{ width: 150, align: "center", gap: 8, shrink: 0 }}>
-                <Image
-                  source={() => "cli:" + cli().id}
-                  style={{ width: 16, height: 16, shrink: 0 }}
-                />
-                <Text
-                  font={{
-                    family: fontFamilies.sans,
-                    size: typeScale.label,
-                    weight: fontWeights.medium,
-                  }}
-                  paint={() => ({ color: palette().textPrimary })}
-                >
-                  {() => cli().name}
-                </Text>
-              </Row>
-
-              <Box
-                style={{ grow: 1, height: 6, clip: true }}
-                paint={() => ({
-                  radius: 3,
-                  background: palette().kbdBg,
-                })}
-              >
-                <Box
-                  style={() => ({
-                    width: Math.max(4, Math.round((260 * cli().percent) / 100)),
-                    height: 6,
-                  })}
-                  paint={() => ({
-                    radius: 3,
-                    background: cli().colorRgba,
-                    transitions: [smoothTransition("width", motion.panel)],
-                  })}
-                />
-              </Box>
-
-              <Row style={{ width: 210, justify: "end", gap: 12, shrink: 0 }}>
-                <Text
-                  font={{ family: fontFamilies.mono, size: typeScale.tiny }}
-                  paint={() => ({ color: palette().textSecondary })}
-                >
-                  {() => `in ${cli().inputTokens}`}
-                </Text>
-                <Text
-                  font={{ family: fontFamilies.mono, size: typeScale.tiny }}
-                  paint={() => ({ color: palette().textMuted })}
-                >
-                  {() => `out ${cli().outputTokens}`}
-                </Text>
-                <Text
-                  font={{
-                    family: fontFamilies.mono,
-                    size: typeScale.tiny,
-                    weight: fontWeights.medium,
-                  }}
-                  paint={() => ({ color: cli().colorRgba })}
-                >
-                  {() => `${Math.round(cli().percent)}%`}
-                </Text>
-              </Row>
-            </Row>
-          )}
-        </For>
+        <Box
+          style={() => ({ position: "absolute", left: 0, top: 0, width: viewWidth.value, height: fadeHeight.value })}
+          paint={() => {
+            const background = palette().appBg;
+            return { gradient: [background, withAlpha(background, 0)] };
+          }}
+        />
       </Column>
     </Column>
   );

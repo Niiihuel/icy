@@ -1387,6 +1387,102 @@ fn overview_stacks_every_workspace_once() {
 }
 
 #[test]
+fn maximize_crossfades_prev_and_next_surfaces_then_settles_to_one() {
+    let mut tiling = Workspaces::new(1, TilingMode::Niri);
+    tiling.open_pane(2, false);
+
+    let mut host =
+        Host::with_request_handler(APP.into(), "{}".into(), TextEngine::default(), |_| {
+            Ok("ok".into())
+        })
+        .unwrap();
+    install_fonts(&mut host);
+    let screen = |id: u64| {
+        json!({
+            "cols": 80, "rowsCount": 1, "cursorRow": 0, "cursorCol": 0, "cursorVisible": false,
+            "rows": [{"idx": 0, "plain": format!("content {id}"), "spans": [], "links": []}]
+        })
+    };
+    for (view, data) in [
+        ("viewport", json!([640, 800])),
+        ("tiling", json!(tiling.snapshot())),
+        (
+            "sessions",
+            json!({"activeId": 2, "archivedCount": 0, "items": [
+                {"id": 1, "title": "Pane 1", "cli": "codex", "cwd": "/p", "alive": true},
+                {"id": 2, "title": "Pane 2", "cli": "codex", "cwd": "/p", "alive": true}]}),
+        ),
+        ("screens", json!({"1": screen(1), "2": screen(2)})),
+    ] {
+        host.push(json!({"view": view, "data": data}).to_string());
+    }
+
+    let pane_surfaces = |frame: &Frame, needle: &str| {
+        let mut stack = Vec::<f32>::new();
+        let mut found = Vec::<Option<f32>>::new();
+        for item in &frame.items {
+            match item {
+                Item::PushSurface { opacity, .. } => stack.push(*opacity),
+                Item::PopSurface => {
+                    stack.pop();
+                }
+                Item::Text { text, .. } if text == needle => {
+                    found.push(stack.last().copied());
+                }
+                _ => {}
+            }
+        }
+        found
+    };
+
+    let before = frame(&mut host);
+    assert_eq!(pane_surfaces(&before, "content 2"), vec![None]);
+    assert!(
+        !before
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::PushSurface { .. }))
+    );
+
+    tiling.toggle_maximize();
+    host.push(json!({"view": "tiling", "data": tiling.snapshot()}).to_string());
+
+    let mut mid_opacities = None;
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(320) {
+        host.poll();
+        let rendered = host.frame(640., 800., 1., 4096);
+        assert!(host.dev_error().is_none(), "{:?}", host.dev_error());
+        let seen = pane_surfaces(&rendered, "content 2");
+        if seen.len() == 2
+            && let (Some(prev), Some(next)) = (seen[0], seen[1])
+            && prev > 0.01
+            && next > 0.01
+        {
+            mid_opacities = Some((prev, next));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(12));
+    }
+
+    let (prev, next) = mid_opacities.expect("expected prev and next surfaces during maximize");
+    assert!(
+        (prev + next - 1.0).abs() < 1e-3,
+        "crossfade opacities should sum to 1: prev={prev}, next={next}"
+    );
+
+    let settled = frame(&mut host);
+    assert_eq!(pane_surfaces(&settled, "content 2"), vec![None]);
+    assert!(
+        !settled
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::PushSurface { .. })),
+        "surfaces should be released after maximize settles"
+    );
+}
+
+#[test]
 fn directory_loader_lists_all_entries_and_keeps_missing_folders_empty() {
     let cwd = std::env::temp_dir().join(format!("icy-directory-{}", std::process::id()));
     std::fs::create_dir_all(cwd.join("folder")).unwrap();

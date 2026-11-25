@@ -382,7 +382,7 @@ function WorkspaceLayer(props: { index: () => number; area: () => [number, numbe
               }}
               // Position goes through `x`/`y`: JSNIR's `left` transition moves only the box's own
               // paint, while `x` carries the panes, so niri's view scroll and close reflow slide.
-              paint={() => ({ x: rect()[0], y: rect()[1], opacity: 1, scale: 1, starting,
+              paint={() => ({ x: rect()[0], y: rect()[1], opacity: 1, scale: 1, resize: "crossfade", starting,
                 transitions: tilingPaneTransitions() })}
             >
               <For each={() => column().panes.map((sid, index) => ({ sid, index }))} key={(pane) => pane.sid}
@@ -401,6 +401,7 @@ function WorkspaceLayer(props: { index: () => number; area: () => [number, numbe
                         opacity: windowDrag.value?.id === pane().sid || overviewDrag.value?.id === pane().sid
                           ? workspaceTiling.dragSourceOpacity : 1,
                         scale: 1,
+                        resize: "crossfade",
                         starting: opening ? { opacity: 0, scale: tilingMotion.openScale } : undefined,
                         exiting: paneExiting(pane().sid),
                         transitions: tilingPaneTransitions(),

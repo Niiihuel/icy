@@ -1189,6 +1189,13 @@ fn resolve_project_dir(base: &Path, raw: &str) -> Result<PathBuf, String> {
     if raw.is_empty() {
         return Err("Enter a folder path.".into());
     }
+    // TSX appends `/` when browsing folders; Windows verbatim `\\?\` paths reject forward slashes.
+    let normalized = if raw.starts_with(r"\\?\") {
+        std::borrow::Cow::Owned(raw.replace('/', "\\"))
+    } else {
+        std::borrow::Cow::Borrowed(raw)
+    };
+    let raw = normalized.as_ref();
     let path = if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
         platform::home_dir()
             .ok_or_else(|| "Home folder is unavailable.".to_string())?

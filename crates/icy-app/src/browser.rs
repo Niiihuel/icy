@@ -930,7 +930,10 @@ pub fn cef_modifiers(mods: ModifiersState, left_down: bool) -> u32 {
     if left_down {
         out |= flags::EVENTFLAG_LEFT_MOUSE_BUTTON.0;
     }
-    out
+    #[allow(clippy::unnecessary_cast)]
+    {
+        out as u32
+    }
 }
 
 /// Windows virtual-key code of a key, as CEF's raw key events expect; 0 when unmapped.
@@ -1124,7 +1127,7 @@ wrap_display_handler! {
         fn on_cursor_change(
             &self,
             _browser: Option<&mut Browser>,
-            _cursor: ::std::os::raw::c_ulong,
+            _cursor: cef::sys::cef_cursor_handle_t,
             type_: CursorType,
             _custom_cursor_info: Option<&CursorInfo>,
         ) -> ::std::os::raw::c_int {

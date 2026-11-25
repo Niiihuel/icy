@@ -919,7 +919,7 @@ mod tests {
         .unwrap();
         let dir = std::env::temp_dir().join(format!("icy-img-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("shot <1> & \"x\".png");
+        let path = dir.join("shot (1) & 'x'.png");
         std::fs::write(&path, png).unwrap();
         let (rgba, size) = super::rasterize_image_file(&path, 2048).expect("png rasterized");
         assert_eq!(size, [1, 1]);

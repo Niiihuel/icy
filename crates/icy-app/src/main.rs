@@ -4890,7 +4890,7 @@ mod tests {
         // A typed path naming a file lists no folder; choosing validates it as one.
         host.edit(&[
             EditorEvent::SelectAll,
-            EditorEvent::Insert(format!("{}/Cargo.toml", cwd.display())),
+            EditorEvent::Insert(cwd.join("Cargo.toml").display().to_string()),
         ]);
         let edited = frame(&mut host);
         click(&mut host, choose(&edited));
@@ -4915,7 +4915,7 @@ mod tests {
 
         host.edit(&[
             EditorEvent::SelectAll,
-            EditorEvent::Insert(format!("{}/", cwd.display())),
+            EditorEvent::Insert(format!("{}{}", cwd.display(), std::path::MAIN_SEPARATOR)),
         ]);
         let listing = frame(&mut host);
         click(&mut host, dialog_text(&listing, "app/"));

@@ -190,6 +190,7 @@ fn server_absent(error: &io::Error) -> bool {
 pub struct Client {
     stream: Mutex<Option<Stream>>,
     _window_lock: File,
+    directory: PathBuf,
 }
 
 impl Client {
@@ -250,6 +251,7 @@ impl Client {
         let client = Arc::new(Self {
             stream: Mutex::new(Some(stream)),
             _window_lock: window_lock,
+            directory: dir.clone(),
         });
         let owner = Arc::downgrade(&client);
         thread::Builder::new()
@@ -302,6 +304,23 @@ impl Client {
 
     pub fn save_layout(&self, layout: &Workspaces) -> io::Result<()> {
         self.request(Request::SaveLayout(layout.clone()))
+    }
+
+    /// Session IDs and archive timestamps, stored separately from the layout protocol.
+    pub fn load_archive(&self) -> io::Result<BTreeMap<u64, u64>> {
+        match File::open(self.directory.join("archive.json")) {
+            Ok(file) => serde_json::from_reader(file).map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn save_archive(&self, archive: &BTreeMap<u64, u64>) -> io::Result<()> {
+        let mut file = tempfile::NamedTempFile::new_in(&self.directory)?;
+        serde_json::to_writer(&mut file, archive).map_err(io::Error::other)?;
+        file.as_file().sync_all()?;
+        file.persist(self.directory.join("archive.json"))?;
+        Ok(())
     }
 
     pub fn spawn(self: &Arc<Self>, spawn: Spawn) -> io::Result<Terminal> {

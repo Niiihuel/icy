@@ -292,34 +292,9 @@ function CliUsageStrip(): Element {
 type SessionFilter = "all" | "idle" | "working";
 const sessionFilter = signal<SessionFilter>("all");
 const agentSort = signal<"priority" | "project">("priority");
-const agentDigitsHeld = signal(false);
-const agentDigitsFlashed = signal(false);
-let agentFlashVersion = 0;
-let agentHoldVersion = 0;
-
-// Badges appear only after Alt is held alone for a moment; a quick Alt+arrow never flashes them.
-function setAgentDigitsHeld(held: boolean): void {
-  const version = ++agentHoldVersion;
-  if (!held) {
-    agentDigitsHeld.value = false;
-    return;
-  }
-  afterView(agentListLayout.holdDelay, () => {
-    if (version === agentHoldVersion) agentDigitsHeld.value = true;
-  });
-}
-
 function handleAgentDigit(digit: number): void {
-  const list = sidebarAgentRows.value;
-  if (digit === 0 && list.length) {
-    const version = ++agentFlashVersion;
-    agentDigitsFlashed.value = true;
-    afterView(agentListLayout.flashDuration, () => {
-      if (version === agentFlashVersion) agentDigitsFlashed.value = false;
-    });
-  } else if (list[digit - 1]) {
-    focusTile(list[digit - 1].id);
-  }
+  const item = sidebarAgentRows.value[digit - 1];
+  if (item) focusTile(item.id);
 }
 
 type AgentCategory = "blocked" | "done" | "working" | "idle" | "exited";
@@ -387,25 +362,9 @@ effect(() => {
 });
 
 function agentShortcutCount(): number {
-  if (activeNav.value !== "agents" || overviewOpen2.value || imageViewer.value || projectDialog.value
+  if (activeNav.value !== "agents" || overviewOpen2.value || imageViewer.value
     || paletteRequest.value || releaseNotesOpen.value || restartConfirmOpen.value) return 0;
   return Math.min(9, sidebarAgentRows.value.length);
-}
-
-function agentNumber(id: number): number {
-  if (!agentDigitsHeld.value && !agentDigitsFlashed.value) return 0;
-  return sidebarAgentRows.value.slice(0, 9).findIndex((item) => item.id === id) + 1;
-}
-
-function AgentNumber(props: { number: () => number }): Element {
-  const size = agentListLayout.badge;
-  return <Show when={() => props.number() > 0} style={{ shrink: 0 }}>
-    {() => <Box style={{ width: size, height: size, align: "center", justify: "center" }}
-      paint={() => ({ radius: radii.sm, background: accent().brand })}>
-      <Text font={{ family: fontFamilies.mono, size: typeScale.tiny, weight: fontWeights.semibold }}
-        paint={() => ({ color: accent().brandFg })}>{() => String(props.number())}</Text>
-    </Box>}
-  </Show>;
 }
 
 function AgentsHeader(): Element {
@@ -439,8 +398,26 @@ function AgentsHeader(): Element {
   );
 }
 
+function ActiveSessionActions(props: { item: () => SessionItem; open: Signal<boolean> }): Element {
+  const action = (run: () => void) => () => {
+    props.open.value = false;
+    run();
+  };
+  return (
+    <Column>
+      <MenuItem icon="square-terminal" label="Focus session" onPress={action(() => focusTile(props.item().id))} />
+      <MenuItem icon="folder-open" label="Show project folder" onPress={action(() => revealPath(props.item().cwd))} />
+      <MenuSeparator />
+      <MenuItem icon="archive" label="Archive session"
+        onPress={action(() => requestHost({ type: "archiveSession", id: props.item().id }))} />
+    </Column>
+  );
+}
+
 function SessionRow(props: { item: () => SessionItem; withinProject?: boolean }): Element {
   const layout = agentListLayout;
+  const hovered = signal(false);
+  const menu = signal(false);
   const isActive = () => activeNav.value === "agents" && sessionsState.value.activeId === props.item().id;
   const category = () => agentCategory(props.item());
   const title = () => cleanTitle(props.item().title) || cliDisplayName(props.item().cli);
@@ -450,39 +427,44 @@ function SessionRow(props: { item: () => SessionItem; withinProject?: boolean })
     : agentSections.find((section) => section.id === category())?.title ?? "Idle";
   const color = () => status() === "Failed" ? palette().destructive : agentStatusColor(category());
   return (
-    <HintTooltip label={title} detail={status} side="right" style={{ shrink: 0 }}>
-      <Row style={{ height: layout.rowHeight, padding: [0, layout.padding, 0, layout.padding], align: "center", gap: layout.gap }}
-        onPress={() => focusTile(props.item().id)} paint={() => ({
-          radius: radii.lg,
-          background: isActive() ? palette().sidebarActive : 0,
-          hover: { background: palette().sidebarActive },
-          a11y: { label: `${label()}, ${status()}` },
-          transitions: [smoothTransition("background", motion.fast)],
-        })}>
-        {/* The number takes the logo's slot, so holding Alt never shifts the row's text. */}
-        <Dynamic value={() => agentNumber(props.item().id) > 0} style={{ shrink: 0 }}>
-          {(numbered) => numbered ? <AgentNumber number={() => agentNumber(props.item().id)} />
-            : <Image source={() => `cli:${props.item().cli}`} style={{ width: layout.icon, height: layout.icon, shrink: 0 }} />}
-        </Dynamic>
-        <Text lines={1} style={{ grow: 1, minWidth: 0 }} font={{ family: fontFamilies.sans, size: typeScale.label }}
-          spans={() => props.withinProject ? [{ text: label(), color: isActive() ? palette().textPrimary : palette().textSecondary }]
-            : [{ text: project(), color: isActive() ? palette().textPrimary : palette().textSecondary },
-                { text: ` · ${title()}`, color: palette().textMuted }]}>{label}</Text>
-        <Box style={{ width: layout.statusSize, height: layout.statusSize, align: "center", justify: "center", shrink: 0 }}>
-          <Dynamic value={category}>
-            {(kind) => kind === "blocked" ? <Glyph name="alert" size={layout.statusSize} color={color} />
-              : kind === "working" ? <Glyph name={() => `agent-working-${shimmerTick.value % agentListLayout.spinnerFrames}`}
-                size={layout.statusSize} color={color} />
-              : <Box style={{ width: layout.dot, height: layout.dot }} paint={() => ({
-                radius: layout.dot / 2,
-                background: kind === "done" || kind === "exited" ? color() : 0,
-                opacity: kind === "exited" ? workspaceTabLayout.dimOpacity : 1,
-                edge: kind === "idle" ? color() : 0, edgeWidth: spacing.hairline * 2,
-              })} />}
-          </Dynamic>
-        </Box>
-      </Row>
-    </HintTooltip>
+    <Row style={{ height: layout.rowHeight, padding: [0, layout.padding, 0, layout.padding],
+      align: "center", gap: spacing.unit, shrink: 0 }}
+      onPress={() => focusTile(props.item().id)}
+      onHover={(inside) => { hovered.value = inside; }}
+      onContextMenu={() => { menu.value = true; }}
+      paint={() => ({
+        radius: radii.lg,
+        background: isActive() || hovered.value || menu.value ? palette().sidebarActive : 0,
+        a11y: { label: `${label()}, ${status()}` },
+        transitions: [smoothTransition("background", motion.fast)],
+      })}>
+      <HintTooltip label={title} detail={status} side="right" disabled={menu} style={{ grow: 1, minWidth: 0 }}>
+        <Row style={{ align: "center", gap: layout.gap, minWidth: 0 }}>
+          <Image source={() => `cli:${props.item().cli}`} style={{ width: layout.icon, height: layout.icon, shrink: 0 }} />
+          <FadeText text={label} font={{ family: fontFamilies.sans, size: typeScale.label }}
+            background={() => isActive() || hovered.value || menu.value ? palette().sidebarActive : palette().sidebarBg}
+            spans={() => props.withinProject ? [{ text: label(), color: isActive() ? palette().textPrimary : palette().textSecondary }]
+              : [{ text: project(), color: isActive() ? palette().textPrimary : palette().textSecondary },
+                  { text: ` · ${title()}`, color: palette().textMuted }]} />
+          <Box style={{ width: layout.statusSize, height: layout.statusSize, align: "center", justify: "center", shrink: 0 }}>
+            <Dynamic value={category}>
+              {(kind) => kind === "blocked" ? <Glyph name="alert" size={layout.statusSize} color={color} />
+                : kind === "working" ? <Glyph name={() => `agent-working-${agentSpinnerTick.value % layout.spinnerFrames}`}
+                  size={layout.statusSize} color={color} />
+                : <Box style={{ width: layout.dot, height: layout.dot }} paint={() => ({
+                  radius: layout.dot / 2,
+                  background: kind === "done" || kind === "exited" ? color() : 0,
+                  opacity: kind === "exited" ? workspaceTabLayout.dimOpacity : 1,
+                  edge: kind === "idle" ? color() : 0, edgeWidth: spacing.hairline * 2,
+                })} />}
+            </Dynamic>
+          </Box>
+        </Row>
+      </HintTooltip>
+      <SessionMenuButton open={menu} visible={hovered} side="right">
+        <ActiveSessionActions item={props.item} open={menu} />
+      </SessionMenuButton>
+    </Row>
   );
 }
 
@@ -652,654 +634,6 @@ function ProjectsHeader(): Element {
   );
 }
 
-type ProjectDialogMode = "session" | "add";
-
-interface ProjectFolder {
-  name: string;
-  path: string;
-  branch?: string | null;
-}
-
-interface ProjectFolders {
-  path: string;
-  parent: string | null;
-  ancestors: ProjectFolder[];
-  branch?: string | null;
-  folders: ProjectFolder[];
-}
-
-interface ProjectPlace {
-  name: string;
-  path: string;
-}
-
-const projectDialog = signal<{ mode: ProjectDialogMode; path?: string; cliId?: string } | null>(null);
-
-function showProjectDialog(mode: ProjectDialogMode, path?: string, cliId?: string): void {
-  if (overviewOpen2.value) closeOverviewMode();
-  projectDialog.value = { mode, path, cliId };
-  requestHost({ type: "projectDialogKeys", on: true });
-}
-
-function closeProjectDialog(): void {
-  projectDialog.value = null;
-  requestHost({ type: "projectDialogKeys", on: false });
-}
-
-// Keys the window routes to the open launcher (up/down/tab/enter/escape/agentN); set while it is mounted.
-let projectDialogKeyHandler: ((action: string) => void) | undefined;
-// The agent last launched from the dialog, preselected next time.
-let lastLaunchCli: string | undefined;
-let launcherHome: string | undefined;
-// XDG user dirs as (kind, path) and GTK bookmarks, read once like Nautilus' sidebar.
-let launcherPlaces: { special: ProjectPlace[]; bookmarks: ProjectPlace[] } | undefined;
-
-// Nautilus' folder-<kind> icons for the XDG user dirs.
-const LAUNCHER_PLACE_GLYPHS: Record<string, string> = {
-  desktop: "monitor", documents: "article", download: "download", music: "music", pictures: "image",
-  videos: "video", templates: "file", publicshare: "share", projects: "file-code",
-};
-
-function launcherPlaceGlyph(path: string, fallback: string): string {
-  if (path === launcherHome) return "home";
-  const place = launcherPlaces?.special.find((entry) => entry.path === path);
-  return (place && LAUNCHER_PLACE_GLYPHS[place.name]) || fallback;
-}
-
-interface LaunchRow {
-  key: string;
-  kind: "ancestor" | "here" | "folder" | "recent";
-  name: string;
-  path: string;
-  depth: number;
-  last: boolean;
-  // Children are listed right below (the folder's ancestors and the current folder).
-  stem: boolean;
-  branch: string;
-  detail: string;
-  count: number;
-}
-
-function launcherPathMode(text: string): boolean {
-  return /^(~|\/|\\\\|[A-Za-z]:[\\/])/.test(text);
-}
-
-function launcherMatch(filter: string, ...values: string[]): boolean {
-  const needle = filter.trim().toLowerCase();
-  return !needle || values.some((value) => value.toLowerCase().includes(needle));
-}
-
-function launcherLiveCount(path: string): number {
-  return sessionsState.value.items.filter((session) => session.alive && session.cwd === path).length;
-}
-
-function BranchBadge(props: { name: () => string; muted?: boolean }): Element {
-  return (
-    <Row style={{ gap: spacing.unit, align: "center", shrink: 0 }}>
-      <Glyph name="git-branch" size={typeScale.tiny} color={() => props.muted ? palette().textMuted : accent().brandText} />
-      <Text lines={1} font={{ family: fontFamilies.mono, size: typeScale.tiny }}
-        paint={() => ({ color: props.muted ? palette().textMuted : accent().brandText })}>{props.name}</Text>
-    </Row>
-  );
-}
-
-// Tree guide: a vertical line under the parent's icon and a tick into this row; rows are
-// contiguous, so the lines join into one tree.
-function LauncherTreeGuide(props: { depth: number; last: boolean; stem: boolean }): Element {
-  const layout = sessionLauncherLayout;
-  const line = spacing.hairline * 2;
-  const x = (props.depth - 1) * layout.indent + layout.gap + layout.icon / 2;
-  const paint = () => ({ background: palette().border });
-  const iconBottom = (layout.rowHeight + layout.icon) / 2 + spacing.unit / 2;
-  return (
-    <Box style={{ width: props.depth * layout.indent, height: layout.rowHeight, shrink: 0 }}>
-      {/* Stem from this row's icon down to its first child. */}
-      {props.stem ? (
-        <Box style={{ position: "absolute", left: x + layout.indent, top: iconBottom, width: line,
-          height: layout.rowHeight - iconBottom }} paint={paint} />
-      ) : null}
-      {props.depth > 0 ? (
-        <Box style={{ position: "absolute", left: x, top: 0, width: line,
-          height: props.last ? layout.rowHeight / 2 : layout.rowHeight }} paint={paint} />
-      ) : null}
-      {props.depth > 0 ? (
-        <Box style={{ position: "absolute", left: x, top: layout.rowHeight / 2,
-          width: props.depth * layout.indent + layout.gap - x - spacing.unit, height: line }} paint={paint} />
-      ) : null}
-    </Box>
-  );
-}
-
-// Hover only highlights, as in the launcher palette: the keyboard selection is what the footer
-// action uses, so a list re-laid out under a still pointer never changes it.
-function LauncherRow(props: { row: () => LaunchRow; selected: () => boolean; onPress: () => void }): Element {
-  const layout = sessionLauncherLayout;
-  const row = props.row;
-  const glyph = () => launcherPlaceGlyph(row().path,
-    row().kind === "here" ? "folder-open" : row().branch ? "git-branch" : "folder");
-  const strong = () => props.selected() || row().kind === "here";
-  return (
-    <Row style={{ height: layout.rowHeight, padding: layout.rowPadding, align: "center", gap: layout.gap, shrink: 0 }}
-      onPress={props.onPress}
-      paint={() => ({
-        radius: radii.md,
-        background: props.selected() ? palette().sidebarActive : 0,
-        hover: { background: props.selected() ? palette().sidebarActive : rowHoverBackground() },
-        transitions: [smoothTransition("background", motion.fast)],
-      })}>
-      <Dynamic value={() => `${row().depth}:${row().last}:${row().stem}`} style={{ shrink: 0 }}>
-        {() => <LauncherTreeGuide depth={row().depth} last={row().last} stem={row().stem} />}
-      </Dynamic>
-      <Glyph name={glyph} size={layout.icon}
-        color={() => row().kind === "here" ? accent().brandText : strong() ? palette().textPrimary : palette().textMuted} />
-      {/* Read row() only inside sources: a read while mounting would subscribe the parent For. */}
-      <Text lines={1} style={{ shrink: 1, minWidth: 0 }} font={{ family: fontFamilies.sans, size: typeScale.label }}
-        paint={() => ({ color: strong() ? palette().textPrimary : row().kind === "ancestor"
-          ? palette().textMuted : palette().textSecondary })}>
-        {() => row().kind === "folder" ? `${row().name}/` : row().name}
-      </Text>
-      <Show when={() => !!row().branch} style={{ shrink: 0 }}>
-        {() => <BranchBadge name={() => row().branch} muted={row().kind !== "here"} />}
-      </Show>
-      <Show when={() => row().count > 0} style={{ shrink: 0 }}>
-        {() => <Text font={{ family: fontFamilies.mono, size: typeScale.tiny }}
-          paint={() => ({ color: palette().statusOnline })}>{() => `● ${row().count}`}</Text>}
-      </Show>
-      <Text lines={1} style={{ grow: 1, minWidth: 0 }} font={{ family: fontFamilies.mono, size: typeScale.tiny }}
-        paint={() => ({ color: palette().textMuted })}>{() => row().detail}</Text>
-      {/* What Enter / Tab do on the selected row. */}
-      <Show when={props.selected} style={{ shrink: 0 }}>
-        {() => <Row style={{ gap: spacing.unit, align: "center" }}>
-          <Show when={() => row().kind !== "here"}>
-            {() => <KbdKey label="Tab" />}
-          </Show>
-          <KbdKey label="↵" />
-        </Row>}
-      </Show>
-    </Row>
-  );
-}
-
-// Step pill: number (a check once done), the step name, and what it holds.
-function LauncherStep(props: { index: number; label: string; value: () => string; branch?: () => string;
-  active: () => boolean; done: () => boolean; onPress: () => void }): Element {
-  const layout = sessionLauncherLayout;
-  return (
-    <Row style={{ height: spacing.controlLg, padding: [0, spacing.unit * 3, 0, spacing.unit * 1.5],
-      gap: layout.gap, align: "center", minWidth: 0, shrink: 1 }}
-      onPress={props.onPress}
-      paint={() => ({
-        radius: radii.md,
-        edge: props.active() ? hoverBorder() : 0, edgeWidth: spacing.hairline,
-        hover: { background: rowHoverBackground() },
-        transitions: [smoothTransition("edge", motion.fast), smoothTransition("background", motion.fast)],
-      })}>
-      <Box style={{ width: layout.stepDot, height: layout.stepDot, align: "center", justify: "center", shrink: 0 }}
-        paint={() => ({
-          radius: layout.stepDot / 2,
-          edge: props.active() ? accent().brandText : palette().border, edgeWidth: spacing.hairline * 2,
-          transitions: [smoothTransition("edge", motion.fast)],
-        })}>
-        <Dynamic value={props.done}>
-          {(done) => done
-            ? <Glyph name="check" size={typeScale.tiny} color={() => accent().brandText} />
-            : <Text font={{ family: fontFamilies.mono, size: typeScale.micro, weight: fontWeights.medium }}
-                paint={() => ({ color: props.active() ? accent().brandText : palette().textMuted })}>{String(props.index)}</Text>}
-        </Dynamic>
-      </Box>
-      <Text font={{ family: fontFamilies.sans, size: typeScale.caption, weight: fontWeights.medium }}
-        paint={() => ({ color: props.active() ? palette().textPrimary : palette().textMuted })}>{props.label}</Text>
-      <Text lines={1} style={{ shrink: 1, minWidth: 0 }} font={{ family: fontFamilies.sans, size: typeScale.caption }}
-        paint={() => ({ color: palette().textSecondary })}>{props.value}</Text>
-      {props.branch ? (
-        <Show when={() => !!props.branch!()} style={{ shrink: 0 }}>
-          {() => <BranchBadge name={props.branch!} muted />}
-        </Show>
-      ) : null}
-    </Row>
-  );
-}
-
-function LauncherPlace(props: { name: Source<string>; glyph: string; count: Source<number>;
-  active: () => boolean; onPress: () => void }): Element {
-  const layout = sessionLauncherLayout;
-  return (
-    <Row style={{ height: layout.placeHeight, padding: [0, spacing.unit * 2, 0, spacing.unit * 2],
-      gap: layout.gap, align: "center", shrink: 0 }}
-      onPress={props.onPress}
-      paint={() => ({
-        radius: radii.md,
-        background: props.active() ? palette().sidebarActive : 0,
-        hover: { background: props.active() ? palette().sidebarActive : rowHoverBackground() },
-        transitions: [smoothTransition("background", motion.fast)],
-      })}>
-      <Glyph name={props.glyph} size={layout.icon}
-        color={() => props.active() ? palette().textPrimary : palette().textMuted} />
-      <Text lines={1} style={{ grow: 1, minWidth: 0 }} font={{ family: fontFamilies.sans, size: typeScale.caption }}
-        paint={() => ({ color: props.active() ? palette().textPrimary : palette().textSecondary })}>{props.name}</Text>
-      <Show when={() => read(props.count) > 0} style={{ shrink: 0 }}>
-        {() => <Text font={{ family: fontFamilies.mono, size: typeScale.tiny }}
-          paint={() => ({ color: palette().statusOnline })}>{() => `● ${read(props.count)}`}</Text>}
-      </Show>
-    </Row>
-  );
-}
-
-function ProjectDialog(): Element {
-  return (
-    <Show when={() => projectDialog.value !== null}>
-      {() => {
-        const request = projectDialog.value!;
-        const adding = request.mode === "add";
-        const layout = sessionLauncherLayout;
-        const error = signal("");
-        let field: Field | undefined;
-        let listId: number | undefined;
-
-        const run = <T,>(action: () => T): T | undefined => {
-          error.value = "";
-          try {
-            return action();
-          } catch (err) {
-            error.value = err instanceof Error ? err.message : String(err);
-          }
-        };
-        const browseHost = (path: string, base?: string): ProjectFolders =>
-          JSON.parse(jsnirRequest(JSON.stringify({ type: "browseProject", path, base })));
-        if (launcherHome === undefined) {
-          try { launcherHome = browseHost("~").path; } catch (_) { launcherHome = ""; }
-        }
-        if (launcherPlaces === undefined) {
-          try { launcherPlaces = JSON.parse(jsnirRequest(JSON.stringify({ type: "projectPlaces" }))); } catch (_) { /* no places */ }
-          launcherPlaces ??= { special: [], bookmarks: [] };
-        }
-        const tilde = (path: string) => launcherHome && (path === launcherHome || path.startsWith(launcherHome + "/"))
-          ? "~" + path.slice(launcherHome.length) : path;
-
-        // Step 1 picks the folder, step 2 the agent ("add" stops after step 1).
-        const step = signal<1 | 2>(1);
-        const chosen = signal<{ path: string; branch: string } | null>(null);
-
-        // A query starting like a path ("/", "~", "C:\\") browses: everything up to the last
-        // separator is the folder, the rest filters it. Any other text filters the folder and recents.
-        const base = run(() => browseHost(request.path ?? workspacePath.value)) ?? null;
-        const query = signal(request.path ? request.path + "/" : "");
-        const location = signal<ProjectFolders | null>(base);
-        let browsedDir = "";
-        const split = (text: string): [string, string] => {
-          const cut = Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\"));
-          if (cut < 0) return [text === "~" ? "~/" : text, ""];
-          return [text.slice(0, cut + 1), text.slice(cut + 1)];
-        };
-        effect(() => {
-          const text = query.value;
-          if (!launcherPathMode(text)) return;
-          const [dir] = split(text);
-          if (dir === browsedDir) return;
-          browsedDir = dir;
-          const found = run(() => browseHost(dir, location.value?.path ?? base?.path));
-          if (found) location.value = found;
-        });
-        const filter = () => launcherPathMode(query.value) ? split(query.value)[1] : query.value.trim();
-
-        const recents = (): LaunchRow[] => Array.from(new Set([
-          ...configState.value.projects,
-          ...sessionsState.value.items.map((session) => session.cwd),
-        ])).map((path) => ({
-          key: "recent:" + path, kind: "recent" as const, name: basename(path) || path, path,
-          depth: 0, last: true, stem: false, branch: "", detail: tilde(path), count: launcherLiveCount(path),
-        }));
-        // The current folder under its ancestors (from ~ when inside home), then its subfolders.
-        const rows = (): LaunchRow[] => {
-          const here = location.value;
-          const text = filter();
-          const out: LaunchRow[] = launcherPathMode(query.value) || !text ? []
-            : recents().filter((row) => launcherMatch(text, row.name, row.path));
-          if (!here) return out;
-          let chain = [...here.ancestors, { name: basename(here.path) || here.path, path: here.path }];
-          const homeAt = chain.findIndex((level) => level.path === launcherHome);
-          if (homeAt >= 0) chain = [{ name: "~", path: chain[homeAt].path }, ...chain.slice(homeAt + 1)];
-          chain = chain.slice(-layout.treeDepth);
-          // Nautilus hides dotfolders until you ask for them.
-          const children = here.folders.filter((folder) =>
-            (!folder.name.startsWith(".") || text.startsWith(".")) && launcherMatch(text, folder.name));
-          chain.forEach((level, depth) => {
-            const isHere = depth === chain.length - 1;
-            out.push({ key: (isHere ? "here:" : "up:") + level.path, kind: isHere ? "here" : "ancestor",
-              name: level.name, path: level.path, depth, last: true, stem: !isHere || children.length > 0,
-              branch: isHere ? here.branch ?? "" : "", detail: "", count: isHere ? launcherLiveCount(level.path) : 0 });
-          });
-          children.forEach((folder, index) => out.push({
-            key: "folder:" + folder.path, kind: "folder", name: folder.name, path: folder.path,
-            depth: chain.length, last: index === children.length - 1, stem: false, branch: folder.branch ?? "",
-            detail: "", count: launcherLiveCount(folder.path),
-          }));
-          return out;
-        };
-        const cursor = signal<string | null>(null);
-        effect(() => { void query.value; void location.value; cursor.value = null; });
-        // A filter selects its first match (none: Enter validates the typed path); otherwise the current folder.
-        const current = (): LaunchRow | undefined => {
-          const list = rows();
-          return list.find((row) => row.key === cursor.value) ?? (filter()
-            ? list.find((row) => row.kind === "folder" || row.kind === "recent")
-            : list.find((row) => row.kind === "here"));
-        };
-
-        const agents = () => [
-          ...configState.value.clis.filter((cli) => cli.enabled).map((cli) => ({ id: cli.id, name: cli.name,
-            detail: cli.description || [cli.command, ...cli.args].join(" ") })),
-          { id: "", name: "Shell", detail: "Plain terminal" },
-        ];
-        const initialAgent = request.cliId ?? lastLaunchCli ?? agents()[0]?.id ?? "";
-        const agent = signal(agents().some((a) => a.id === initialAgent) ? initialAgent : "");
-        const agentQuery = signal("");
-        const shownAgents = () => agents().filter((a) => launcherMatch(agentQuery.value, a.name, a.detail));
-        const currentAgent = () => shownAgents().find((a) => a.id === agent.value) ?? shownAgents()[0];
-        const agentName = () => agents().find((a) => a.id === agent.value)?.name ?? "Shell";
-
-        const setQuery = (text: string) => {
-          field?.replace(text);
-          query.value = text;
-        };
-        const open = (row: LaunchRow | undefined) => {
-          // The field holds absolute paths (`~` only shortens descriptions), so any host resolves them.
-          if (row && row.kind !== "here") setQuery(row.path + "/");
-        };
-        const choose = (row = current()) => {
-          // Nothing matched: validate what was typed as a folder.
-          const folder = row ? row.path : run(() => browseHost(query.value, location.value?.path))?.path;
-          if (!folder) return;
-          if (adding) {
-            if (run(() => jsnirRequest(JSON.stringify({ type: "addProject", path: folder }))) !== undefined) closeProjectDialog();
-            return;
-          }
-          // Subfolders share the current repo's branch unless they are repos themselves.
-          const inside = row?.kind === "here" || row?.kind === "folder";
-          const branch = row?.branch || (inside ? location.value?.branch ?? "" : "");
-          chosen.value = { path: folder, branch };
-          agentQuery.value = "";
-          step.value = 2;
-        };
-        const back = () => {
-          error.value = "";
-          step.value = 1;
-        };
-        const launch = (pick = currentAgent()) => {
-          const folder = chosen.value?.path;
-          if (!folder || !pick) return;
-          const result = run(() => jsnirRequest(JSON.stringify(
-            { type: pick.id ? "launchCli" : "newSession", cliId: pick.id, cwd: folder })));
-          if (result === undefined) return;
-          lastLaunchCli = pick.id;
-          activeNav.value = "agents";
-          closeProjectDialog();
-        };
-        const move = (delta: number) => {
-          if (step.value === 2) {
-            const list = shownAgents();
-            const at = list.findIndex((a) => a.id === currentAgent()?.id);
-            const next = list[at + delta];
-            if (next) agent.value = next.id;
-            return;
-          }
-          const list = rows();
-          if (list.length === 0) return;
-          const at = Math.max(0, list.findIndex((row) => row.key === current()?.key));
-          const index = (at + delta + list.length) % list.length;
-          cursor.value = list[index].key;
-          if (listId === undefined) return;
-          // Rows share one height: keep the selected one centred.
-          const visible = jsnir.columns.height[listId] ?? 0;
-          scrollTo(listId, { offset: Math.max(0, index * layout.rowHeight - (visible - layout.rowHeight) / 2), smooth: true });
-        };
-        projectDialogKeyHandler = (action) => {
-          if (action === "escape") (step.value === 2 ? back() : closeProjectDialog());
-          else if (action === "up") move(-1);
-          else if (action === "down") move(1);
-          else if (action === "tab" && step.value === 1) open(current());
-          else if (action === "enter") (step.value === 1 ? choose() : launch());
-          else if (action.startsWith("agent") && !adding) {
-            const pick = agents()[Number(action.slice(5)) - 1];
-            if (pick) agent.value = pick.id;
-          }
-        };
-        onCleanup(() => { projectDialogKeyHandler = undefined; });
-
-        const hint = (keys: string, label: string) => (
-          <Row style={{ gap: spacing.unit, align: "center", shrink: 0 }}>
-            <KbdKey label={keys} />
-            <Text font={{ family: fontFamilies.sans, size: typeScale.tiny }}
-              paint={() => ({ color: palette().textMuted })}>{label}</Text>
-          </Row>
-        );
-        const hairline = (sides: [number, number, number, number]) => () =>
-          ({ edge: palette().border, edgeWidth: spacing.hairline, edgeSides: sides });
-        const sectionTitle = (title: string) => (
-          <Row style={{ height: layout.sectionHeight, padding: [0, spacing.unit * 2, 0, spacing.unit * 2], align: "center", shrink: 0 }}>
-            <Text font={{ family: fontFamilies.sans, size: typeScale.tiny, weight: fontWeights.medium }}
-              paint={() => ({ color: palette().textMuted })}>{title.toUpperCase()}</Text>
-          </Row>
-        );
-        const goTo = (path: string) => setQuery(path + "/");
-
-        // Left column, as in Nautilus: home and the XDG folders, GTK bookmarks, then recent projects.
-        const placesColumn = () => {
-          const places = launcherPlaces!;
-          const home = launcherHome ? [{ key: "home", name: "Home", path: launcherHome, glyph: "home" }] : [];
-          const special = places.special.map((place) => ({ key: "xdg:" + place.path, name: basename(place.path),
-            path: place.path, glyph: LAUNCHER_PLACE_GLYPHS[place.name] ?? "folder" }));
-          const marks = places.bookmarks.map((place) => ({ key: "mark:" + place.path, name: place.name,
-            path: place.path, glyph: "bookmark" }));
-          const groups = [
-            { title: "Places", items: [...home, ...special] },
-            { title: "Bookmarks", items: marks },
-          ].filter((group) => group.items.length > 0);
-          return (
-            <Column style={{ width: layout.placesWidth, shrink: 0, scroll: true, clip: true,
-              padding: [layout.listInset, layout.listInset, layout.listInset, layout.listInset] }}
-              paint={() => ({ scrollbar: editorScrollbar(), ...hairline([0, 1, 0, 0])() })}>
-              {groups.map((group) => (
-                <Column style={{ shrink: 0 }}>
-                  {sectionTitle(group.title)}
-                  {group.items.map((item) => <LauncherPlace name={item.name} glyph={item.glyph}
-                    count={0} active={() => location.value?.path === item.path} onPress={() => goTo(item.path)} />)}
-                </Column>
-              ))}
-              <Show when={() => recents().length > 0} style={{ shrink: 0 }}>
-                {() => (
-                  <Column>
-                    {sectionTitle("Recent")}
-                    <For each={recents} key={(row) => row.key} style={{ shrink: 0 }}>
-                      {(row) => <LauncherPlace name={() => row().name} glyph="clock" count={() => row().count}
-                        active={() => location.value?.path === row().path} onPress={() => goTo(row().path)} />}
-                    </For>
-                  </Column>
-                )}
-              </Show>
-            </Column>
-          );
-        };
-
-        const folderStep = () => (
-          <Column style={{ grow: 1, minHeight: 0 }}>
-            {/* Search / path field */}
-            <Row style={{ height: layout.inputHeight, padding: layout.inputPadding, gap: layout.gap, align: "center", shrink: 0 }}
-              paint={hairline([0, 0, 1, 0])}>
-              <Glyph name={adding ? "folder-plus" : "search"} size={layout.icon} color={() => palette().textMuted} />
-              <TextInput
-                value={query.value}
-                ref={(input) => { field = input; }}
-                autoFocus
-                retainOnSubmit
-                style={{ grow: 1, minWidth: 0, height: spacing.control }}
-                font={{ family: fontFamilies.sans, size: typeScale.body }}
-                placeholder={adding ? "Filter folders or type a path…" : "Filter this folder, search recents or type a path…"}
-                placeholderColor={palette().textMuted}
-                onChange={(text) => { error.value = ""; query.value = text; }}
-                onSubmit={() => choose()}
-                paint={() => ({ color: palette().textPrimary })}
-              />
-              <IconButton icon="arrow-up" label="Parent folder" side="bottom" layer={projectDialogLayout.layer + 2} size="sm"
-                disabled={() => !location.value?.parent}
-                onPress={() => { const up = location.value?.parent; if (up) goTo(up); }} />
-              <IconButton icon="home" label="Home folder" side="bottom" layer={projectDialogLayout.layer + 2} size="sm"
-                onPress={() => goTo(launcherHome || "~")} />
-            </Row>
-            <Row style={{ grow: 1, minHeight: 0 }}>
-              {placesColumn()}
-              {/* Folder tree */}
-              <Column ref={(node) => { listId = node; }}
-                style={{ grow: 1, minWidth: 0, minHeight: 0, scroll: true, clip: true,
-                  padding: [layout.listInset, layout.listInset, layout.listInset, layout.listInset] }}
-                paint={() => ({ scrollbar: editorScrollbar() })}>
-                <For each={rows} key={(row) => row.key} style={{ shrink: 0 }}>
-                  {(row) => <LauncherRow row={row}
-                    selected={() => current()?.key === row().key}
-                    onPress={() => (row().kind === "here" ? choose(row()) : open(row()))} />}
-                </For>
-                <Show when={() => !!location.value && location.value.folders.length === 0}>
-                  {() => <Text style={{ padding: layout.rowPadding }} font={{ family: fontFamilies.sans, size: typeScale.tiny }}
-                    paint={() => ({ color: palette().textMuted })}>No subfolders</Text>}
-                </Show>
-                <Show when={() => !!filter() && !current() && !error.value}>
-                  {() => <EmptyState compact title="No folder matches" style={{ padding: layout.gap }} />}
-                </Show>
-              </Column>
-            </Row>
-          </Column>
-        );
-
-        const agentStep = () => (
-          <Column style={{ grow: 1, minHeight: 0 }}>
-            <Row style={{ height: layout.inputHeight, padding: layout.inputPadding, gap: layout.gap, align: "center", shrink: 0 }}
-              paint={hairline([0, 0, 1, 0])}>
-              <Glyph name="search" size={layout.icon} color={() => palette().textMuted} />
-              <TextInput autoFocus retainOnSubmit
-                style={{ grow: 1, minWidth: 0, height: spacing.control }}
-                font={{ family: fontFamilies.sans, size: typeScale.body }}
-                placeholder="Filter agents…" placeholderColor={palette().textMuted}
-                onChange={(text) => { agentQuery.value = text; }}
-                onSubmit={() => launch()}
-                paint={() => ({ color: palette().textPrimary })}
-              />
-            </Row>
-            <Column style={{ grow: 1, minHeight: 0, scroll: true, clip: true,
-              padding: [layout.listInset, layout.listInset, layout.listInset, layout.listInset * 2] }}
-              paint={() => ({ scrollbar: editorScrollbar() })}>
-              {sectionTitle("Agents")}
-              <For each={shownAgents} key={(entry) => entry.id || "shell"} style={{ shrink: 0 }}>
-                {(entry) => {
-                  const index = () => agents().findIndex((a) => a.id === entry().id) + 1;
-                  return (
-                    <PaletteResultRow
-                      result={() => ({ key: entry().id || "shell", icon: "square-terminal",
-                        image: entry().id ? "cli:" + entry().id : undefined, label: entry().name,
-                        detail: index() <= 9 ? `Alt ${index()} · ${entry().detail}` : entry().detail, onSelect: () => {} })}
-                      selected={() => currentAgent()?.id === entry().id}
-                      onSelect={() => launch(entry())} />
-                  );
-                }}
-              </For>
-              <Show when={() => shownAgents().length === 0}>
-                {() => <EmptyState compact title="No agent matches" style={{ padding: layout.gap }} />}
-              </Show>
-            </Column>
-          </Column>
-        );
-
-        return (
-          <Box
-            style={() => ({
-              position: "fixed", left: 0, top: 0,
-              width: viewportSize.value[0], height: viewportSize.value[1],
-              layer: projectDialogLayout.layer, align: "center", justify: "center",
-            })}
-            onPress={closeProjectDialog}
-            paint={() => ({ background: palette().backdrop })}
-          >
-            <Column
-              style={() => ({
-                width: layout.width, maxWidth: Math.max(0, viewportSize.value[0] - layout.screenMargin * 2),
-                height: layout.height, maxHeight: Math.max(0, viewportSize.value[1] - layout.screenMargin * 2),
-                clip: true,
-              })}
-              onPress={() => {}}
-              paint={() => ({
-                radius: radii.xl, background: palette().cardBg, edge: palette().border,
-                edgeWidth: spacing.hairline, shadows: [shadows.modal], ...accordeeDialogMotion(),
-              })}
-            >
-              {/* Steps: folder → agent */}
-              {adding ? <Box /> : (
-                <Row style={{ height: layout.stepsHeight, padding: [0, layout.listInset * 2, 0, layout.listInset * 2],
-                  gap: layout.gap, align: "center", shrink: 0 }} paint={hairline([0, 0, 1, 0])}>
-                  <LauncherStep index={1} label="Folder"
-                    value={() => tilde(step.value === 2 ? chosen.value?.path ?? "" : location.value?.path ?? "")}
-                    branch={() => step.value === 2 ? chosen.value?.branch ?? "" : location.value?.branch ?? ""}
-                    active={() => step.value === 1} done={() => step.value === 2} onPress={back} />
-                  <Box style={{ width: layout.gap * 2, height: spacing.hairline * 2, shrink: 0 }}
-                    paint={() => ({ background: palette().border })} />
-                  <LauncherStep index={2} label="Agent" value={agentName}
-                    active={() => step.value === 2} done={() => false}
-                    onPress={() => { if (step.value === 1) choose(); }} />
-                </Row>
-              )}
-
-              <Dynamic value={() => step.value} style={{ grow: 1, minHeight: 0 }}>
-                {(at) => at === 1 ? folderStep() : agentStep()}
-              </Dynamic>
-
-              {/* Hints + the step's action */}
-              <Row style={{ padding: layout.barPadding, gap: layout.gap, align: "center", shrink: 0 }}
-                paint={hairline([1, 0, 0, 0])}>
-                <Dynamic value={() => `${step.value}:${error.value}`} style={{ grow: 1, minWidth: 0 }}>
-                  {() => error.value
-                    ? <Text lines={1} font={{ family: fontFamilies.sans, size: typeScale.caption }}
-                        paint={() => ({ color: palette().destructive })}>{error.value}</Text>
-                    : step.value === 1
-                      ? <Row style={{ gap: layout.gap * 2, align: "center", clip: true }}>
-                          {hint("↑↓", "select")}
-                          {hint("Tab", "open folder")}
-                          {hint("↵", adding ? "add" : "choose")}
-                          {hint("Esc", "close")}
-                        </Row>
-                      : <Row style={{ gap: layout.gap * 2, align: "center", clip: true }}>
-                          {hint("↑↓", "select")}
-                          {hint("Alt 1–9", "agent")}
-                          {hint("Esc", "back")}
-                        </Row>}
-                </Dynamic>
-                <Row style={{ height: layout.actionHeight, padding: [0, spacing.unit * 2, 0, spacing.unit * 3], gap: spacing.unit * 2, align: "center", shrink: 0 }}
-                  onPress={() => (step.value === 1 ? choose() : launch())}
-                  paint={() => ({
-                    radius: radii.md,
-                    background: accent().brand,
-                    hover: { opacity: controlState.hoverOpacity },
-                    active: { scale: controlState.pressScale },
-                    transitions: [
-                      smoothTransition("background", motion.fast),
-                      smoothTransition("opacity", motion.fast),
-                      smoothTransition("scale", motion.fast),
-                    ],
-                  })}>
-                  <Text font={{ family: fontFamilies.sans, size: typeScale.caption, weight: fontWeights.medium }}
-                    paint={() => ({ color: accent().brandFg })}>
-                    {() => adding ? "Add project" : step.value === 1 ? "Choose agent"
-                      : currentAgent()?.id ? `Launch ${currentAgent()!.name}` : "Open shell"}
-                  </Text>
-                  <Glyph name={() => step.value === 1 && !adding ? "arrow-right" : "check"} size={typeScale.caption}
-                    color={() => accent().brandFg} />
-                </Row>
-              </Row>
-            </Column>
-          </Box>
-        );
-      }}
-    </Show>
-  );
-}
-
 function ExpandedSidebar(): Element {
   const accountOpen = signal(false);
   let accountAnchor: number | undefined;
@@ -1322,7 +656,7 @@ function ExpandedSidebar(): Element {
       {/* Search + collapse (workspaces live left of the tabs and in the overview) */}
       <Row style={{ height: 36, margin: [0, 0, 4, 0], align: "center", gap: 4, shrink: 0 }}>
         <Row
-          style={{ height: spacing.controlLg, grow: 1, minWidth: 0, padding: [0, spacing.unit, 0, spacing.unit],
+          style={{ height: spacing.control, grow: 1, minWidth: 0, padding: [0, spacing.unit, 0, spacing.unit],
             align: "center", gap: spacing.unit }}
           onPress={() => togglePalette("sessions")}
           paint={() => ({
@@ -1347,7 +681,7 @@ function ExpandedSidebar(): Element {
 
         <HintTooltip label="Collapse sidebar" side="bottom">
           <Box
-            style={{ width: 32, height: 32, align: "center", justify: "center", shrink: 0 }}
+            style={{ width: spacing.control, height: spacing.control, align: "center", justify: "center", shrink: 0 }}
             onPress={() => {
               sidebarCompact.value = true;
               syncLayout();
@@ -1522,12 +856,14 @@ function RailButton(props: {
   image?: Source<string>;
   leading?: Element;
   active?: Source<boolean>;
+  tooltipDisabled?: Source<boolean>;
   onPress: () => void;
+  onContextMenu?: () => void;
   ref?: (id: number) => void;
 }): Element {
   const isActive = () => read(props.active ?? false);
   return (
-    <HintTooltip label={props.label} keys={props.keys} side="right">
+    <HintTooltip label={props.label} keys={props.keys} side="right" disabled={props.tooltipDisabled}>
       <Box
         ref={props.ref}
         style={{
@@ -1538,6 +874,7 @@ function RailButton(props: {
           shrink: 0,
         }}
         onPress={props.onPress}
+        onContextMenu={props.onContextMenu}
         paint={() => ({
           radius: radii.lg,
           background: isActive() ? palette().sidebarActive : 0,
@@ -1571,6 +908,24 @@ function RailDivider(): Element {
       style={{ width: 18, height: 1, margin: [8, 0, 8, 0], shrink: 0 }}
       paint={() => ({ background: palette().border })}
     />
+  );
+}
+
+function SessionRailButton(props: { item: () => SessionItem }): Element {
+  const menu = signal(false);
+  let anchor: number | undefined;
+  return (
+    <Box style={{ shrink: 0 }}>
+      <RailButton label={() => cleanTitle(props.item().title)} tooltipDisabled={menu}
+        leading={<Image source={() => "cli:" + props.item().cli}
+          style={{ width: agentListLayout.icon, height: agentListLayout.icon }} />}
+        active={() => activeNav.value === "agents" && sessionsState.value.activeId === props.item().id}
+        onPress={() => focusTile(props.item().id)} onContextMenu={() => { menu.value = true; }}
+        ref={(id) => { anchor = id; }} />
+      <MenuPanel open={menu} anchor={() => anchor} side="right">
+        <ActiveSessionActions item={props.item} open={menu} />
+      </MenuPanel>
+    </Box>
   );
 }
 
@@ -1621,17 +976,7 @@ function CompactSidebar(): Element {
         key={(item) => item.id}
         style={{ grow: 1, basis: 0, minHeight: 0, scroll: true, align: "center", gap: 4 }}
       >
-        {(item) => (
-          <RailButton
-            label={() => cleanTitle(item().title)}
-            leading={<Dynamic value={() => agentNumber(item().id) > 0}>
-              {(numbered) => numbered ? <AgentNumber number={() => agentNumber(item().id)} />
-                : <Image source={() => `cli:${item().cli}`} style={{ width: agentListLayout.icon, height: agentListLayout.icon }} />}
-            </Dynamic>}
-            active={() => activeNav.value === "agents" && sessionsState.value.activeId === item().id}
-            onPress={() => focusTile(item().id)}
-          />
-        )}
+        {(item) => <SessionRailButton item={item} />}
       </For>
 
       <RailButton label="Archived" icon="archive" onPress={openArchivedTab} />

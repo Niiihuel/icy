@@ -53,23 +53,61 @@ function PaneFrame(props: {
 function terminalCellWidth(): number { return terminalFontSize.value * terminalGridLayout.advance; }
 function terminalCellHeight(): number { return terminalFontSize.value * terminalGridLayout.lineHeight; }
 
-function TerminalCellRuns(props: { row: () => TerminalRow; onLinkHover?: (index: number, anchor: number, inside: boolean) => void }): Element {
+function TerminalGrid(props: BoxProps): Element {
+  const grid = Box(props);
+  return {
+    mount(parent, before) {
+      // Scrollback replaces rows while their hover events can still be queued.
+      // Use JSNIR's virtual-row callback guards so a recycled ID cannot open a link.
+      const scope = childScope(true);
+      (currentScope.children ??= []).push(scope);
+      return inScope(scope, () => grid.mount(parent, before, null));
+    },
+  };
+}
+
+const terminalLinkKeys = new WeakMap<DetectedLink, string>();
+
+function terminalLinkKey(link: DetectedLink | undefined): string {
+  if (!link) return "";
+  const known = terminalLinkKeys.get(link);
+  if (known !== undefined) return known;
+  const key = JSON.stringify(link);
+  terminalLinkKeys.set(link, key);
+  return key;
+}
+
+function TerminalCellRuns(props: {
+  row: () => TerminalRow;
+  onLinkHover?: (index: number, anchor: number, inside: boolean) => void;
+  onLinkPress: (link: DetectedLink) => void;
+}): Element {
   return <Dynamic value={() => terminalFontSize.value}>
     {(size) => {
       const font = { family: fontFamilies.mono, size, lineHeight: terminalGridLayout.lineHeight };
-      return <For each={() => props.row().spans} key={(span) => `${span.col}:${span.bold}:${span.linkIndex ?? ""}`}>
+      return <For each={() => props.row().spans} key={(span) => {
+        // A live row can replace a link between mouse-down and mouse-up.
+        const index = span.linkIndex;
+        const link = index === undefined ? undefined : props.row().links[index];
+        return `${span.col}:${span.bold}:${index ?? ""}:${terminalLinkKey(link)}`;
+      }}>
         {(span) => {
           const { bold, linkIndex } = span();
+          const detected = linkIndex === undefined ? undefined : props.row().links[linkIndex];
+          // A file path missing from the session cwd stays plain text: it could only open a "File not found" tab.
+          // Its row is re-resolved on every frame, so the span becomes a link once the file exists.
+          const link = detected?.kind === "file" && !detected.resolved ? undefined : detected;
           const text = () => span().text.trimEnd();
           const onLinkHover = props.onLinkHover;
           let spanId = 0;
           let hovered = false;
-          const hover = linkIndex === undefined || !onLinkHover ? undefined : (inside: boolean) => {
+          const hover = linkIndex === undefined || !link || !onLinkHover ? undefined : (inside: boolean) => {
             hovered = inside;
             onLinkHover(linkIndex, spanId, inside);
           };
           if (hover) onCleanup(() => { if (hovered) hover(false); });
           return <Box ref={hover ? (id) => { spanId = id; } : undefined} onHover={hover}
+            onPress={link ? () => props.onLinkPress(link) : undefined}
             style={() => ({ position: "absolute", top: 0, left: span().col * terminalCellWidth(),
             width: span().cells * terminalCellWidth(), height: terminalCellHeight() })}
             paint={() => ({ background: span().selected ? terminalSelectionBg() : span().image ? accent().brandSoft : span().bg })}>
@@ -77,8 +115,8 @@ function TerminalCellRuns(props: { row: () => TerminalRow; onLinkHover?: (index:
               width: span().cells * terminalCellWidth() + size * terminalGridLayout.textSlack })}>
               <Text font={bold ? { ...font, weight: terminalGridLayout.boldWeight } : font}
                 paint={() => ({
-                  color: span().image || span().link ? accent().brandText : span().fg,
-                  underline: !span().image && (span().underline || span().link),
+                  color: span().image || (span().link && link) ? accent().brandText : span().fg,
+                  underline: !span().image && (span().underline || (span().link && !!link)),
                 })}>{text}</Text>
             </Box>
           </Box>;
@@ -92,6 +130,7 @@ function TerminalPane(props: {
   sessionId: () => number;
   focused: () => boolean;
   multiPane: () => boolean;
+  resizePty?: () => boolean;
 }): Element {
   const snapshot = () => screensMapState.value[String(props.sessionId())];
   // The host only streams on-screen panes: keep the last frame so a pane sliding out of (or back
@@ -101,7 +140,6 @@ function TerminalPane(props: {
 
   const sessionMeta = () =>
     sessionsState.value.items.find((s) => s.id === props.sessionId());
-  const working = () => sessionWorking(sessionMeta());
 
   const hovered = signal(false);
   // The wheel over the grid scrolls this terminal (focused or not), never the tiling: the host
@@ -118,7 +156,7 @@ function TerminalPane(props: {
     const width = jsnir.columns.width[gridId] ?? 0;
     const height = jsnir.columns.height[gridId] ?? 0;
     gridHeight.value = height;
-    if (width <= 2 * terminalGridLayout.left || height <= 2 * terminalGridLayout.top) return;
+    if (props.resizePty?.() === false || width <= 2 * terminalGridLayout.left || height <= 2 * terminalGridLayout.top) return;
     const cols = Math.max(2, Math.min(400, Math.floor((width - 2 * terminalGridLayout.left) / terminalCellWidth())));
     const rows = Math.max(1, Math.min(200, Math.floor((height - 2 * terminalGridLayout.top) / terminalCellHeight())));
     const key = `${props.sessionId()}:${cols}:${rows}`;
@@ -148,12 +186,13 @@ function TerminalPane(props: {
   };
   // Fullscreen is one discrete step whose final layout is known now: resize the PTY at once, as
   // a niri client does when it gets the new size, so the program redraws while the tiling
-  // springs instead of after it settles.
-  let wasMaximized = tilingState.value.maximized;
+  // springs instead of after it settles. Fullscreen following focus to another tab is the same step.
+  const fullscreenHere = () => tilingState.value.maximized && tilingState.value.focusedSession === props.sessionId();
+  let wasFullscreen = fullscreenHere();
   effect(() => {
-    const maximized = tilingState.value.maximized;
-    if (maximized === wasMaximized) return;
-    wasMaximized = maximized;
+    const full = fullscreenHere();
+    if (full === wasFullscreen) return;
+    wasFullscreen = full;
     afterView(terminalGridLayout.settleDelay, reportSize);
   });
   // Windows move under a still pointer (tiling springs, resizes): refresh the origin after them.
@@ -227,12 +266,12 @@ function TerminalPane(props: {
           source={() => "cli:" + (sessionMeta()?.cli ?? "terminal")}
           style={{ width: 14, height: 14, shrink: 0 }}
         />
-        <ShimmerText
+        <FadeText
           text={() => cleanTitle(sessionMeta()?.title ?? `pane-${props.sessionId()}`)}
           font={{ family: fontFamilies.sans, size: typeScale.label }}
-          color={() => props.focused() && !working() ? palette().textPrimary : palette().textSecondary}
-          shimmer={working}
-          marquee={() => hovered.value}
+          color={() => props.focused() ? palette().textPrimary : palette().textSecondary}
+          background={() => palette().appBg}
+          layoutChanged={() => { void tilingState.value; void resizeDrag.value; }}
         />
         <Row
           style={{ align: "center", gap: 0, shrink: 0 }}
@@ -241,6 +280,9 @@ function TerminalPane(props: {
             transitions: [smoothTransition("opacity", motion.fast)],
           })}
         >
+          <Show when={() => tilingState.value.mode === "niri" && !tilingState.value.maximized} style={{ shrink: 0 }}>
+            {() => paneAction("columns", "Maximize column", () => keysFor("layout.maximizeColumn"), () => tilingAction("maximizeColumn"))}
+          </Show>
           {paneAction("maximize", "Fullscreen pane", () => keysFor("view.fullscreen"), toggleTiledMaximize)}
           {paneAction("close", "Close", () => keysFor("session.close"), () => closeSession(props.sessionId()))}
         </Row>
@@ -259,7 +301,7 @@ function TerminalPane(props: {
       </Show>
 
       {/* Pure terminal VT grid (Geist Mono, lineHeight multiplier 1.4) + inline images */}
-      <Box
+      <TerminalGrid
         ref={(id) => { gridId = id; afterView(terminalGridLayout.settleDelay, reportSize); }}
         style={{ grow: 1, minHeight: 0, clip: true }}
         onHover={(inside) => {
@@ -285,10 +327,12 @@ function TerminalPane(props: {
         {(row) => {
           const hasLinks = row().links.length > 0;
           // The link under the pointer (its span is the popover anchor), not the row's first one.
-          const pointed = signal<{ index: number; anchor: number } | null>(null);
+          const pointed = signal<{ index: number; anchor: number; key: string } | null>(null);
           const pointedLink = () => {
             const at = pointed.value;
-            return at ? row().links[at.index] : undefined;
+            if (!at) return undefined;
+            const link = row().links[at.index];
+            return terminalLinkKey(link) === at.key ? link : undefined;
           };
           const imageLink = () => {
             const link = pointedLink();
@@ -339,8 +383,10 @@ function TerminalPane(props: {
               if (count <= 0 && pointed.value?.index === index) leavePreview();
               return;
             }
-            const same = pointed.value?.index === index;
-            pointed.value = { index, anchor: same ? pointed.value?.anchor ?? anchor : anchor };
+            const key = terminalLinkKey(row().links[index]);
+            const previous = pointed.value;
+            const same = previous?.index === index && previous.key === key;
+            pointed.value = { index, anchor: same ? previous.anchor : anchor, key };
             if (same && hovered.value) {
               ++hoverToken;
               return;
@@ -362,12 +408,16 @@ function TerminalPane(props: {
             });
           };
           let rowId: number | undefined;
-          const openRowLink = (link: DetectedLink | undefined) => {
+          const openRowLink = (link: DetectedLink) => {
             dismissPreview();
             const id = props.sessionId();
-            if (!props.focused()) selectSession(id);
-            if (link?.image) openScreenImages(screen(), link.target, id);
-            else if (link) openLink(link, id);
+            // The first click on another pane only focuses it, so switching panes never opens a link.
+            if (!props.focused()) {
+              selectSession(id);
+              return;
+            }
+            if (link.image) openScreenImages(screen(), link.target, id);
+            else openLink(link, id);
           };
           return (
             <Box
@@ -390,14 +440,13 @@ function TerminalPane(props: {
                 height: terminalCellHeight(),
                 shrink: 0,
               })}
-              onPress={() => openRowLink(pointedLink() ?? row().links[0])}
               paint={() => ({
                 radius: radii.xs,
                 hover: hasLinks ? { background: accent().brandSoft } : undefined,
                 transitions: [smoothTransition("background", motion.fast)],
               })}
             >
-              <TerminalCellRuns row={row} onLinkHover={hasLinks ? linkHover : undefined} />
+              <TerminalCellRuns row={row} onLinkHover={hasLinks ? linkHover : undefined} onLinkPress={openRowLink} />
               <Show when={() => row().spans.length === 0 && !!row().plain}>
                 {() => <Text lines={1} font={{ family: fontFamilies.mono, size: terminalFontSize.value,
                   lineHeight: terminalGridLayout.lineHeight }}>{() => row().plain}</Text>}
@@ -431,7 +480,10 @@ function TerminalPane(props: {
                           cardHovered = inCard;
                           if (!inCard && !inside.get(pointed.value?.index ?? -1)) leavePreview();
                         }}
-                        onOpen={() => openRowLink(urlLink())} />
+                        onOpen={() => {
+                          const url = urlLink();
+                          if (url) openRowLink(url);
+                        }} />
                     ) : (
                       <Box />
                     )
@@ -465,7 +517,7 @@ function TerminalPane(props: {
           </Row>
         )}
       </Show>
-      </Box>
+      </TerminalGrid>
     </PaneFrame>
   );
 }

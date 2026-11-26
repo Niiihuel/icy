@@ -44,6 +44,8 @@ onHost(function (message: { view?: string; data?: any }) {
     receiveDoc(message.data);
   } else if (message.view === "editorSaved") {
     receiveEditorSaved(message.data);
+  } else if (message.view === "editorKey") {
+    receiveEditorKey(message.data);
   } else if (message.view === "editorSaveKey") {
     const spec = focusedTile();
     if (spec?.kind === "file") saveEditorDraft(editorDrafts.get(docKey(spec)));
@@ -97,25 +99,21 @@ onHost(function (message: { view?: string; data?: any }) {
     receiveGitGraph(message.data as GitGraphView);
   } else if (message.view === "fileSearch") {
     fileSearch.value = message.data;
-  } else if (message.view === "agentDigitsHeld") {
-    setAgentDigitsHeld(!!message.data);
   } else if (message.view === "agentDigit") {
     if (agentShortcutCount() > 0) handleAgentDigit(Number(message.data));
   } else if (message.view === "modalKey") {
     const action = String(message.data);
-    if (projectDialog.value) {
-      // The dialog owns Escape: its agent step goes back to the folder step.
-      if (projectDialogKeyHandler) projectDialogKeyHandler(action);
-      else if (action === "escape") closeProjectDialog();
-    } else if (paletteRequest.value) {
-      if (action === "escape") closePalette();
-      else if (action === "panel.side") togglePalette("launcher");
+    if (paletteRequest.value) {
+      if (action === "panel.side") togglePalette("launcher");
       else if (action === "session.search") togglePalette("sessions");
+      else if (action === "workspace.switcher") togglePalette("workspaces");
       else paletteKeyHandler?.(action);
     } else if (imageViewer.value) {
       handleModalKey(action);
     } else if (action === "session.search") {
       togglePalette("sessions");
+    } else if (action === "workspace.switcher") {
+      togglePalette("workspaces");
     } else if (action === "session.new") createSession();
     else if (action === "column.new") openTiledColumn();
     else if (action === "pane.split") stackTiledVertical();
@@ -160,6 +158,8 @@ onHost(function (message: { view?: string; data?: any }) {
 function WorkspaceShell(): Element {
   const stroke = workspaceTabLayout.stroke;
   const framed = () => !overviewOpen2.value && !isEmptyWorkspace();
+  const backdropPaused = () =>
+    !!(paletteRequest.value || imageViewer.value || releaseNotesOpen.value || restartConfirmOpen.value);
   const radius = radii.lg;
   return (
     <Row style={{ grow: 1, minHeight: 0 }}>
@@ -170,9 +170,15 @@ function WorkspaceShell(): Element {
         style={{ grow: 1, minWidth: 0, minHeight: 0,
           margin: [spacing.workspaceFrame, spacing.workspaceFrame, spacing.workspaceFrame, 0],
           padding: [stroke, 0, 0, 0], clip: true }}
+        paint={() => isEmptyWorkspace() ? ({
+          radius,
+          mask: backdropPaused() ? workspacePixelBlast.pausedMask : workspacePixelBlast.mask,
+          gradient: [
+            withAlpha(palette().textMuted, workspacePixelBlast.baseOpacity),
+            withAlpha(accent().brandText, workspacePixelBlast.accentOpacity),
+          ],
+        }) : {}}
       >
-        {/* ASCII backdrop covering the full panel including the tab row when empty. */}
-        <EmptyWorkspaceBackdrop />
         {/* The header and tab row sit above the workspace tiling. */}
         <TabBar />
         {/* All four corners of the frame curve evenly; TabBar overlaps the top stroke so the
@@ -213,7 +219,6 @@ function IcyApp(): Element {
 
       {/* Global Accordee-animated modal overlays */}
       <SearchPalette />
-      <ProjectDialog />
       <ReleaseNotesModal />
       <ImageViewerModal />
       <RestartConfirmModal />

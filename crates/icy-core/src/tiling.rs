@@ -870,6 +870,7 @@ impl TilingWorkspace {
             return;
         };
         let had_focus = self.focused_session == session_id;
+        let focused_col = self.locate(self.focused_session).map(|(c, _)| c);
         let restore = had_focus.then(|| self.restore_on_close.take()).flatten();
         // Fullscreen belongs to the pane shown: closing it brings the tiled layout back instead
         // of handing fullscreen to whichever pane gets focus next.
@@ -895,6 +896,11 @@ impl TilingWorkspace {
             return;
         }
         if !had_focus {
+            // niri `remove_column_by_idx`: a column removed left of the focused one shifts the
+            // column to return to, so it is forgotten.
+            if column_gone && focused_col.is_some_and(|f| col < f) {
+                self.restore_on_close = None;
+            }
             self.ensure_focused_visible();
             return;
         }
@@ -1224,10 +1230,11 @@ impl Workspaces {
     }
 
     pub fn open_pane(&mut self, pane: u64, stack: bool) {
+        let workspace = &mut self.list[self.active];
         if stack {
-            self.list[self.active].stack_vertical(pane);
+            workspace.stack_vertical(pane);
         } else {
-            self.list[self.active].open_column(pane);
+            workspace.open_column(pane);
         }
         self.tidy();
     }
@@ -1435,6 +1442,20 @@ mod tests {
         ws.focus_direction(FocusDir::Right);
         ws.remove_session(5);
         assert_eq!(ws.focused_session(), 3);
+
+        // Closing a column left of the new one also forgets it, as in niri.
+        let mut ws = TilingWorkspace::new(1, TilingMode::Niri);
+        ws.open_column(2);
+        ws.open_column(3);
+        ws.focus_direction(FocusDir::Left);
+        ws.open_column(4); // [1, 2, 4, 3], opened from 2
+        ws.remove_session(1);
+        ws.remove_session(4);
+        assert_eq!(
+            ws.focused_session(),
+            3,
+            "right neighbour, not the shifted column"
+        );
     }
 
     #[test]
@@ -1620,6 +1641,34 @@ mod tests {
                 assert!(!tiling.is_maximized());
             }
         }
+    }
+
+    #[test]
+    fn niri_new_windows_open_right_of_focus_even_in_fullscreen() {
+        let mut tiling = Workspaces::new(1, TilingMode::Niri);
+        tiling.open_pane(2, false);
+        tiling.open_pane(3, false);
+        tiling.focus_session(2);
+        let before = tiling.snapshot();
+
+        tiling.open_pane(4, false);
+        assert_eq!(tiling.pane_order(), [1, 2, 4, 3]);
+        assert_eq!(tiling.focused_session(), 4);
+        let after = tiling.snapshot();
+        for existing in &before.columns {
+            let column = after
+                .columns
+                .iter()
+                .find(|col| col.id == existing.id)
+                .unwrap();
+            assert_eq!(column.width, existing.width);
+        }
+
+        tiling.toggle_maximize();
+        tiling.open_pane(5, false);
+        assert_eq!(tiling.pane_order(), [1, 2, 4, 5, 3]);
+        assert!(tiling.is_maximized());
+        assert_eq!(tiling.visible_pane_ids(), [5]);
     }
 
     #[test]

@@ -19,6 +19,7 @@ const APP_FILES: &[&str] = &[
     "app/browser.tsx",
     "app/editor.tsx",
     "app/palette.tsx",
+    "app/launcher-folders.tsx",
     "app/imageviewer.tsx",
     "app/settings.tsx",
     "app/metrics-data.ts",

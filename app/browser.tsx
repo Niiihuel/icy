@@ -3,6 +3,7 @@
 
 function BrowserView(props: { id: number; spec: TileSpec }): Element {
   const st = () => browserStates.value[props.id];
+  const paneFocused = () => activeNav.value === "agents" && tilingState.value.focusedSession === props.id;
   const hovered = signal(false);
   // The page is sized to the body node; the host gets its logical size (see reportSize).
   let bodyId: number | undefined;
@@ -93,10 +94,13 @@ function BrowserView(props: { id: number; spec: TileSpec }): Element {
           style={{ grow: 1, minWidth: 0, height: browserLayout.fieldHeight, padding: browserLayout.fieldPadding, align: "center" }}
           paint={() => ({ radius: browserLayout.fieldRadius, edge: palette().border, edgeWidth: spacing.hairline })}
         >
-          {/* Remounted when the page reports another address, so the field shows where the page is. */}
-          <Dynamic value={addressOf} style={{ grow: 1, minWidth: 0 }}>
-            {(address) => {
-              const autoFocus = focusAddress && activeNav.value === "agents" && tilingState.value.focusedSession === props.id;
+          {/* Remounted when the page reports another address, so the field shows where the page is,
+              and when the pane loses focus: removing the field is the only way to drop its text
+              focus (ARCHITECTURE.md, JSNIR gap 19), which would otherwise keep every other tab's keys. */}
+          <Dynamic value={() => `${paneFocused() ? "focused" : "idle"} ${addressOf()}`} style={{ grow: 1, minWidth: 0 }}>
+            {(key) => {
+              const address = key.slice(key.indexOf(" ") + 1);
+              const autoFocus = focusAddress && paneFocused();
               focusAddress = false;
               return <TextInput
                 value={address}

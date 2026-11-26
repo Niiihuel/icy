@@ -104,27 +104,29 @@ function MetricsTooltip(props: {
   const { tooltipWidth, tooltipPadding, tooltipRow, tooltipOffset, mark } = metricsLayout;
   const pointer = () => props.hover.pointer.value;
   const rows = signal<MetricsTipRow[]>([]);
-  const placement = signal<[number, number, number]>([0, 0, tooltipWidth]);
+  // Pointer moves only change the paint offset; the width lives apart so the layout is untouched.
+  const placement = signal<[number, number]>([0, 0]);
+  const width = signal(tooltipWidth);
   let side: [boolean, boolean] | undefined;
   effect(() => { rows.value = props.rows(); });
   effect(() => {
     const point = pointer();
     if (!point) { side = undefined; return; }
     const [, x, y, extentX, extentY] = point;
-    const width = Math.min(tooltipWidth, extentX);
+    const tipWidth = Math.min(tooltipWidth, extentX);
     const height = metricsTooltipHeight(rows.value.length);
     // Choose the side once per hover. Clamp subsequent moves instead of jumping across the pointer.
-    side ??= [x + tooltipOffset + width <= extentX, !props.preferAbove && y + tooltipOffset + height <= extentY];
+    side ??= [x + tooltipOffset + tipWidth <= extentX, !props.preferAbove && y + tooltipOffset + height <= extentY];
+    width.value = tipWidth;
     placement.value = [
-      metricsTooltipOffset(x, width, extentX, side[0]),
+      metricsTooltipOffset(x, tipWidth, extentX, side[0]),
       metricsTooltipOffset(y, height, extentY, side[1]),
-      width,
     ];
   });
   return (
     <Column
       style={() => ({
-        position: "absolute", left: 0, top: 0, width: placement.value[2], padding: tooltipPadding, gap: spacing.unit,
+        position: "absolute", left: 0, top: 0, width: width.value, padding: tooltipPadding, gap: spacing.unit,
       })}
       paint={() => ({
         x: placement.value[0],
@@ -155,11 +157,40 @@ function MetricsTooltip(props: {
   );
 }
 
+// Lazy memo: callers still subscribe to whatever `deps` reads, and `compute` (which must read
+// nothing beyond `deps`) reruns only when one of them changes. Unlike an effect it never runs ahead
+// of its readers, so a data change re-evaluates each bar once.
+function metricsMemo<T>(deps: () => unknown[], compute: () => T): () => T {
+  let last: unknown[] | undefined;
+  let value!: T;
+  return () => {
+    const next = deps();
+    if (!last || next.some((dep, i) => dep !== last![i])) {
+      last = next;
+      value = compute();
+    }
+    return value;
+  };
+}
+
 // Keep one active point across the visual gutters between cells or segments.
 function metricsHover(data: () => MetricsDashboard) {
   const hovered = signal(-1);
   const shown = signal(0);
   const pointer = signal<MetricsPointer | null>(null);
+  // ECharts' hover layer: `any` flips when the pointer enters or leaves the chart, and one flag per
+  // mark flips when the pointed mark changes, so moving between marks repaints two of them.
+  const any = new LocalSignal(false);
+  const marks: LocalSignal<boolean>[] = [];
+  let lit = -1;
+  effect(() => {
+    const index = hovered.value;
+    any.value = index >= 0;
+    if (index === lit) return;
+    if (marks[lit]) marks[lit].value = false;
+    lit = index;
+    if (marks[index]) marks[index].value = true;
+  });
   let chartId: number | undefined;
   let leaveToken = 0;
   const clear = () => {
@@ -177,6 +208,11 @@ function metricsHover(data: () => MetricsDashboard) {
     hovered,
     shown,
     pointer,
+    any,
+    /** Whether mark `index` is the pointed one. */
+    active(index: number): boolean {
+      return (marks[index] ??= new LocalSignal(index === lit)).value;
+    },
     ref(id: number) { chartId = id; },
     enter(index: number) {
       if (chartId === undefined || index < 0) return;
@@ -367,7 +403,8 @@ function MetricCard(props: {
   const values = () => props.data().totals;
   const delta = () => props.available(values()) && props.available(props.data().previous)
     ? metricDelta(values()[props.field], props.data().previous[props.field]) : "";
-  const peak = () => Math.max(1, ...props.data().buckets.map((bucket) => bucket[props.field]));
+  const peak = metricsMemo(() => [props.data().buckets],
+    () => Math.max(1, ...props.data().buckets.map((bucket) => bucket[props.field])));
   const color = () => metricsColors()[props.field];
   return (
     <Column
@@ -490,21 +527,25 @@ function MetricsVolume(props: { data: () => MetricsDashboard }): Element {
     return !shared ? plotHeight : field === "input" ? layout.plotInputHeight : layout.plotOutputHeight;
   };
   const buckets = () => props.data().buckets;
-  const ticks = (field: VolumeField) => metricNiceScale(
+  // Each bar reads the scales; compute them once per data or legend change instead of per bar.
+  const scale = (field: VolumeField) => metricsMemo(() => [buckets(), height(field)], () => metricNiceScale(
     Math.max(0, ...buckets().map((bucket) => bucket[field])),
     Math.floor(height(field) / layout.gridSpacing),
-  );
+  ));
+  const scales = { input: scale("input"), output: scale("output") };
+  const ticks = (field: VolumeField) => scales[field]();
   const axisMax = (field: VolumeField) => { const all = ticks(field); return all[all.length - 1]; };
   // Input rises from the baseline, output hangs below it.
   const baseline = () => height("input");
   const yOf = (field: VolumeField, value: number) => field === "input"
     ? baseline() - height("input") * value / axisMax("input")
     : baseline() + height("output") * value / axisMax("output");
-  const grid = () => (["input", "output"] as const).flatMap((field) => height(field) === 0 ? [] :
-    ticks(field)
-      // One baseline when both series share it.
-      .filter((tick) => tick > 0 || field === "input" || !visible.input.value)
-      .map((tick) => ({ key: `${field}:${tick}`, y: yOf(field, tick), label: metricCompact(tick), base: tick === 0 })));
+  const grid = metricsMemo(() => [ticks("input"), ticks("output"), visible.input.value, visible.output.value],
+    () => (["input", "output"] as const).flatMap((field) => height(field) === 0 ? [] :
+      ticks(field)
+        // One baseline when both series share it.
+        .filter((tick) => tick > 0 || field === "input" || !visible.input.value)
+        .map((tick) => ({ key: `${field}:${tick}`, y: yOf(field, tick), label: metricCompact(tick), base: tick === 0 }))));
   const plotWidth = () => Math.max(1, metricsWidth() - 2 * layout.cardPadding - layout.plotScaleWidth - layout.gap);
   const slot = () => plotWidth() / Math.max(1, buckets().length);
   const barInset = () => Math.max(spacing.hairline, slot() * layout.barGapFraction);
@@ -582,7 +623,7 @@ function MetricsVolume(props: { data: () => MetricsDashboard }): Element {
                 style={() => ({ direction: "row", position: "absolute", left: 0, top: 0, width: plotWidth(), height: plotHeight })}>
                 {(bucket) => {
                   const index = () => buckets().indexOf(bucket());
-                  const dimmed = () => hover.hovered.value >= 0 && hover.hovered.value !== index();
+                  const dimmed = () => hover.any.value && !hover.active(index());
                   const bar = (field: VolumeField) => {
                     const fade = (color: number) => withAlpha(color, layout.barFade);
                     return (
@@ -668,7 +709,14 @@ function MetricsActivity(props: { data: () => MetricsDashboard }): Element {
   const gridWidth = () => metricsPanelWidth() - 2 * layout.cardPadding;
   const cellWidth = () => (gridWidth() - layout.heatmapLabelWidth - 24 * layout.heatmapGap) / 24;
   const cellX = (hour: number) => layout.heatmapLabelWidth + layout.heatmapGap + hour * (cellWidth() + layout.heatmapGap);
-  const hoveredRow = () => hover.hovered.value < 0 ? -1 : Math.floor(hover.hovered.value / 24);
+  // Labels repaint when the pointed row or hour changes, not on every cell.
+  const hoveredRow = new LocalSignal(-1);
+  const hoveredHour = new LocalSignal(-1);
+  effect(() => {
+    const index = hover.hovered.value;
+    hoveredRow.value = index < 0 ? -1 : Math.floor(index / 24);
+    hoveredHour.value = index < 0 ? -1 : index % 24;
+  });
   const caption = () => {
     const peak = props.data().peak;
     if (count(peak) === 0) return "No model calls";
@@ -681,7 +729,7 @@ function MetricsActivity(props: { data: () => MetricsDashboard }): Element {
           {metricWeekdays.map((weekday, row) => (
             <Row style={{ align: "center" }}>
               <MetricsAxisText style={{ width: layout.heatmapLabelWidth + layout.heatmapGap, shrink: 0 }}
-                color={() => hoveredRow() === row ? palette().textPrimary : metricsColors().axis}>{weekday}</MetricsAxisText>
+                color={() => hoveredRow.value === row ? palette().textPrimary : metricsColors().axis}>{weekday}</MetricsAxisText>
               {metricHours.map((hour) => {
                 const index = row * 24 + hour;
                 return (
@@ -698,7 +746,7 @@ function MetricsActivity(props: { data: () => MetricsDashboard }): Element {
                       paint={() => ({
                         radius: radii.xs,
                         background: metricsHeatColor(intensity(index)),
-                        edge: hover.hovered.value === index ? palette().textPrimary : 0,
+                        edge: hover.active(index) ? palette().textPrimary : 0,
                         edgeWidth: spacing.hairline * 2,
                         transitions: [smoothTransition("edge", motion.fast)],
                       })}
@@ -712,7 +760,7 @@ function MetricsActivity(props: { data: () => MetricsDashboard }): Element {
             {[0, 6, 12, 18].map((hour) => (
               <Box style={() => ({ position: "absolute", top: 0, left: cellX(hour) })}>
                 <MetricsAxisText
-                  color={() => hover.hovered.value >= 0 && hover.hovered.value % 24 === hour ? palette().textPrimary : metricsColors().axis}>
+                  color={() => hoveredHour.value === hour ? palette().textPrimary : metricsColors().axis}>
                   {hourLabel(hour)}
                 </MetricsAxisText>
               </Box>
@@ -831,7 +879,7 @@ function MetricsProviderShare(props: { data: () => MetricsDashboard; hover: Retu
                   paint={() => ({
                     radius: radii.xs,
                     background: metricsProviderColor(provider().id),
-                    brightness: props.hover.hovered.value === index() ? metricsLayout.providerHoverBrightness : 1,
+                    brightness: props.hover.active(index()) ? metricsLayout.providerHoverBrightness : 1,
                   })}
                 />
               );

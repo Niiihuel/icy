@@ -252,7 +252,7 @@ function TilingWorkspaceView(): Element {
             on it leaves the overview. */}
         <Box style={() => ({ position: "absolute", left: 0, top: 0, width: area.value[0], height: area.value[1] })}
           onPress={() => { if (overviewOpen2.value && !overviewDragged) closeOverviewMode(); }}
-          paint={() => ({ background: palette().sidebarBg })}
+          paint={() => ({ background: isEmptyWorkspace() ? 0 : palette().sidebarBg })}
         />
         {/* JSNIR scales a box about its centre, which is niri's zoom about the output centre. */}
         <Box style={() => ({ position: "absolute", left: 0, top: 0, width: area.value[0], height: area.value[1] })}
@@ -296,6 +296,12 @@ function TilingWorkspaceView(): Element {
 
         <WindowDragOverlay area={() => area.value} />
 
+        <OverviewLabels area={() => area.value} />
+        <Show when={() => overviewOpen2.value} style={{ position: "absolute", left: 0, top: 0 }}>
+          {() => <OverviewFilterBar area={() => area.value} />}
+        </Show>
+        <WorkspacePill area={() => area.value} />
+
         {/* An empty workspace (niri keeps one at the end): what to open here. */}
         <Show when={isEmptyWorkspace} style={{ grow: 1, minHeight: 0 }}>
           {() => <EmptyWorkspace width={() => area.value[0]} />}
@@ -319,6 +325,176 @@ function TilingWorkspaceView(): Element {
   );
 }
 
+// Screen top of a workspace in the overview: the stack zooms about the area's centre.
+function overviewWorkspaceTop(index: number, area: [number, number]): number {
+  const zoom = tilingMotion.overviewZoom;
+  return area[1] / 2 + ((index - centeredWorkspace()) * workspacePitch(area) - area[1] / 2) * zoom;
+}
+
+// Overview: each workspace's name and Alt+N in the gap above it. Always mounted (no presses), shown by
+// opacity, and moved with the same spring as the stack.
+function OverviewLabels(props: { area: () => [number, number] }): Element {
+  const layout = overviewFilterLayout;
+  const zoom = tilingMotion.overviewZoom;
+  return (
+    <For each={() => workspaceList().map((_, index) => index)} key={(index) => index}
+      style={{ position: "absolute", left: 0, top: 0 }}>
+      {(index) => {
+        const current = () => overviewOpen2.value && overviewWorkspace() === index();
+        return (
+          <Row
+            style={() => ({ position: "absolute", left: props.area()[0] * (1 - zoom) / 2, top: 0,
+              width: props.area()[0] * zoom, height: layout.labelHeight, align: "center", gap: spacing.unit * 2 })}
+            paint={() => ({
+              y: overviewWorkspaceTop(index(), props.area()) - layout.labelHeight,
+              opacity: overviewOpen2.value ? 1 : 0,
+              transitions: [workspaceTransition("y"), smoothTransition("opacity", motion.fast)],
+            })}
+          >
+            <Text lines={1} font={{ family: fontFamilies.sans, size: typeScale.label, weight: fontWeights.medium }}
+              paint={() => ({ color: current() ? palette().textPrimary : palette().textSecondary,
+                transitions: [smoothTransition("color", motion.fast)] })}>
+              {() => workspaceLabel(index())}
+            </Text>
+            <Text font={{ family: fontFamilies.sans, size: typeScale.caption }}
+              paint={() => ({ color: palette().textMuted })}>
+              {() => String(workspaceList()[index()]?.panes.length || "")}
+            </Text>
+            <Box style={{ grow: 1 }} />
+            {index() < 9 ? (
+              <Row style={{ align: "center", gap: spacing.unit / 2 }}>
+                <KbdKey label="Alt" />
+                <KbdKey label={String(index() + 1)} />
+              </Row>
+            ) : <Box />}
+          </Row>
+        );
+      }}
+    </For>
+  );
+}
+
+// Overview filter: "/" (or a click) opens the field; `@` offers the status tokens, Tab completes.
+function OverviewFilterBar(props: { area: () => [number, number] }): Element {
+  const layout = overviewFilterLayout;
+  const barHeight = floatingLayout.searchHeight;
+  const width = () => Math.min(layout.width, Math.max(0, props.area()[0] - layout.top * 2));
+  const left = () => (props.area()[0] - width()) / 2;
+  const anyMatch = () => allWindowIds().some((id) => overviewMatches(id));
+  const card = () => ({ ...floatingSurface(), ...accordeeMenuMotion("top") });
+  return (
+    <Box style={{ position: "absolute", left: 0, top: 0, layer: layout.layer }}>
+      <Row
+        style={() => ({ position: "absolute", left: left(), top: layout.top, width: width(), height: barHeight,
+          padding: [0, launcherLayout.gutter, 0, launcherLayout.gutter], align: "center",
+          gap: launcherLayout.rowInset })}
+        onPress={() => { overviewFiltering.value = true; }}
+        paint={() => ({ ...card(), cursor: "text" })}
+      >
+        <Glyph name="search" size={floatingLayout.icon} color={() => palette().textMuted} />
+        <Dynamic value={() => overviewFiltering.value ? overviewFilterRevision.value : -1}
+          style={{ grow: 1, minWidth: 0 }}>
+          {(revision) => revision >= 0 ? (
+            <CodeInput autoFocus retainOnSubmit value={overviewFilter.value}
+              selection={[[...overviewFilter.value].length, [...overviewFilter.value].length]}
+              style={{ grow: 1, minWidth: 0, height: spacing.controlLg }}
+              font={{ family: fontFamilies.sans, size: typeScale.title }}
+              placeholder="Filter windows, folders or @status" placeholderColor={palette().textMuted}
+              onChange={setOverviewFilter}
+              paint={() => ({ color: palette().textPrimary })} />
+          ) : (
+            <Text lines={1} font={{ family: fontFamilies.sans, size: typeScale.title }}
+              paint={() => ({ color: overviewFilter.value ? palette().textPrimary : palette().textMuted })}>
+              {() => overviewFilter.value || "Filter windows, folders or @status"}
+            </Text>
+          )}
+        </Dynamic>
+        <KbdKey label={() => overviewFiltering.value ? "Esc" : "/"} />
+      </Row>
+
+      <Show when={() => overviewFiltering.value && overviewSuggestions().length > 0}
+        style={{ position: "absolute", left: 0, top: 0 }}>
+        {() => (
+          <For each={overviewSuggestions} key={(f) => f.token}
+            style={() => ({ position: "absolute", left: left(), top: layout.top + barHeight + spacing.unit,
+              width: layout.suggestionWidth, padding: spacing.unit, gap: spacing.unit / 2 })}
+            paint={card}>
+            {(filter) => {
+              const first = () => overviewSuggestions()[0]?.token === filter().token;
+              return (
+                <Row style={{ height: spacing.menuItem, padding: [0, spacing.unit * 2, 0, spacing.unit * 2],
+                  align: "center", gap: spacing.unit * 2 }}
+                  onPress={() => completeOverviewFilter(filter().token)}
+                  paint={() => ({ ...selectableRowPaint(first()), transitions: [smoothTransition("edge", motion.fast)] })}>
+                  <Text font={{ family: fontFamilies.sans, size: typeScale.label, weight: fontWeights.medium }}
+                    paint={() => ({ color: palette().textPrimary })}>{() => filter().token}</Text>
+                  <Text lines={1} style={{ grow: 1, minWidth: 0 }}
+                    font={{ family: fontFamilies.sans, size: typeScale.caption }}
+                    paint={() => ({ color: palette().textMuted })}>{() => filter().detail}</Text>
+                  <Show when={first}>{() => <KbdKey label="Tab" />}</Show>
+                </Row>
+              );
+            }}
+          </For>
+        )}
+      </Show>
+
+      <Show when={() => !!overviewFilter.value.trim() && !anyMatch()} style={{ position: "absolute", left: 0, top: 0 }}>
+        {() => (
+          <Column style={() => ({ position: "absolute", left: 0, top: props.area()[1] / 2, width: props.area()[0],
+            align: "center" })}>
+            <EmptyState compact centered title="No windows match" detail="Esc clears the filter" />
+          </Column>
+        )}
+      </Show>
+    </Box>
+  );
+}
+
+// "Workspace 2 / 6 · name" at the bottom for a moment after the active workspace changes.
+let workspacePillStamp = 0;
+
+function WorkspacePill(props: { area: () => [number, number] }): Element {
+  const layout = workspacePillLayout;
+  const shown = signal(false);
+  let last = -1;
+  effect(() => {
+    const active = tilingState.value.activeWorkspace;
+    if (active === last) return;
+    const restored = last < 0;
+    last = active;
+    // The overview already names every workspace; the restored layout is not a switch.
+    if (restored || !workspaceReady.value || overviewOpen2.value) return;
+    shown.value = true;
+    const stamp = ++workspacePillStamp;
+    afterView(layout.holdMs, () => { if (stamp === workspacePillStamp) shown.value = false; });
+  });
+  const active = () => tilingState.value.activeWorkspace;
+  return (
+    <Row
+      style={() => ({ position: "absolute", left: 0, top: props.area()[1] - layout.bottom - layout.height,
+        width: props.area()[0], height: layout.height, justify: "center", layer: layout.layer })}
+      paint={() => ({ opacity: shown.value ? 1 : 0, y: shown.value ? 0 : spacing.unit * 1.5,
+        transitions: [smoothTransition("opacity", motion.enter), smoothTransition("y", motion.enter)] })}
+    >
+      <Row style={{ height: layout.height, padding: [0, spacing.unit * 3, 0, spacing.unit * 3], align: "center",
+        gap: spacing.unit * 2 }}
+        paint={() => ({ ...floatingSurface(), radius: layout.height / 2 })}>
+        <Box style={{ width: layout.dot, height: layout.dot }}
+          paint={() => ({ radius: layout.dot / 2, background: accent().brand })} />
+        <Text font={{ family: fontFamilies.sans, size: typeScale.caption, weight: fontWeights.medium }}
+          paint={() => ({ color: palette().textPrimary })}>
+          {() => `Workspace ${active() + 1} / ${workspaceList().length}`}
+        </Text>
+        <Text font={{ family: fontFamilies.sans, size: typeScale.caption }}
+          paint={() => ({ color: palette().textMuted })}>
+          {() => `· ${workspaceLabel(active())}`}
+        </Text>
+      </Row>
+    </Row>
+  );
+}
+
 // One workspace of the stack, drawn live at full size: the stack's zoom shrinks it for the overview.
 function WorkspaceLayer(props: { index: () => number; area: () => [number, number]; active: () => TilingView }): Element {
   const view = () => workspaceTilingView(props.index(), props.active());
@@ -337,7 +513,9 @@ function WorkspaceLayer(props: { index: () => number; area: () => [number, numbe
       paint={() => ({
         y: (props.index() - centeredWorkspace()) * workspacePitch(props.area()),
         radius: overviewOpen2.value ? zoomed(radii.panel) : 0,
-        background: dropHere() && !overviewDrop.value?.insert ? accent().brandSoft : palette().appBg,
+        // Clear the empty workspace so the shell backdrop shows through.
+        background: dropHere() && !overviewDrop.value?.insert ? accent().brandSoft
+          : empty() && isEmptyWorkspace() ? 0 : palette().appBg,
         edge: dropHere() || selected() ? accent().brand : 0,
         edgeWidth: zoomed(workspaceTiling.guideWidth),
         edgeSides: dropHere() && overviewDrop.value?.insert ? [1, 0, 0, 0] : [1, 1, 1, 1],
@@ -399,7 +577,8 @@ function WorkspaceLayer(props: { index: () => number; area: () => [number, numbe
                         x: 0,
                         y: geometry()[0],
                         opacity: windowDrag.value?.id === pane().sid || overviewDrag.value?.id === pane().sid
-                          ? workspaceTiling.dragSourceOpacity : 1,
+                          ? workspaceTiling.dragSourceOpacity
+                          : overviewOpen2.value && !overviewMatches(pane().sid) ? overviewFilterLayout.dimOpacity : 1,
                         scale: 1,
                         resize: "crossfade",
                         starting: opening ? { opacity: 0, scale: tilingMotion.openScale } : undefined,
@@ -409,7 +588,8 @@ function WorkspaceLayer(props: { index: () => number; area: () => [number, numbe
                     >
                       <Dynamic value={() => isTerminalId(pane().sid)} style={{ grow: 1, minWidth: 0, minHeight: 0 }}>
                         {(terminal) => terminal ? (
-                          <TerminalPane sessionId={() => pane().sid} focused={focused} multiPane={multiPane} />
+                          <TerminalPane sessionId={() => pane().sid} focused={focused} multiPane={multiPane}
+                            resizePty={() => isActive() && (!view().maximized || focused())} />
                         ) : (
                           <TilePane id={() => pane().sid} focused={focused} multiPane={multiPane}
                             paintOffset={() => [rect()[0], rect()[1] + geometry()[0]]} />
@@ -462,152 +642,6 @@ function isEmptyWorkspace(): boolean {
   return workspaceReady.value && !overviewOpen2.value && tilingState.value.columns.length === 0;
 }
 
-const ASCII_RAMP = " .·:-=+*";
-
-// Draw the grid at its actual glyph advance and row pitch. The main panel clips the
-// extra columns during the sidebar spring, so the pattern reaches the edge throughout.
-// The field drifts over time and ripples out from the pointer while it moves.
-function EmptyWorkspaceBackdrop(): Element {
-  const layout = emptyWorkspaceLayout;
-  const inset = workspaceTabLayout.stroke;
-  const panelWidth = () => {
-    const side = sidebarCompact.value ? spacing.sidebarRail : spacing.sidebarWidth;
-    return Math.max(1, viewportSize.value[0] - side - spacing.workspaceFrame - 2 * inset);
-  };
-  const gridWidth = () => Math.max(1, viewportSize.value[0] - spacing.sidebarRail - spacing.workspaceFrame - 2 * inset);
-  const height = () => Math.max(1, viewportSize.value[1] - 2 * (spacing.workspaceFrame + inset));
-  const rowCount = () => Math.ceil(height() / layout.asciiCellH);
-  const colCount = () => Math.ceil(gridWidth() / layout.asciiCellW) + 1;
-  // One frame of the field: seconds of drift, and the eased pointer (grid pixels, presence 0..1).
-  const field = signal({ t: 0, x: 0, y: 0, presence: 0 });
-  // A modal over the backdrop freezes it: nothing to see, nothing to spend.
-  const paused = () => projectDialog.value !== null || paletteRequest.value !== null;
-
-  return (
-    <Show when={isEmptyWorkspace} style={() => ({
-      position: "absolute", left: inset, top: inset, width: gridWidth(), height: height(),
-    })}>
-      {() => {
-        // The host reports the pointer relative to one node at a time (the metrics channel);
-        // a hovered chart may borrow it, so each tick claims it back while it is free.
-        const pointer = signal<MetricsPointer | null>(null);
-        let node: number | undefined;
-        let alive = true;
-        let target: [number, number] | null = null;
-        let movedAt = 0;
-        // Plain copy of the field's time, so the pointer effect below does not subscribe to every frame.
-        let clock = 0;
-        const claim = () => {
-          if (node === undefined || metricsPointerTarget) return;
-          metricsPointerTarget = { id: node, position: pointer, clear: () => { pointer.value = null; } };
-          requestHost({ type: "metricsPointer", id: node });
-        };
-        effect(() => {
-          const point = pointer.value;
-          if (!point) return;
-          target = [point[1], point[2]];
-          movedAt = clock;
-        });
-        let running = false;
-        const tick = () => {
-          if (!alive || paused()) {
-            running = false;
-            return;
-          }
-          claim();
-          // Read outside any effect: the tick itself subscribes to nothing.
-          const { t, x, y, presence } = field.value;
-          const now = t + layout.asciiFrameMs / 1000;
-          clock = now;
-          const active = target !== null && now - movedAt < layout.asciiPointerIdle;
-          const ease = layout.asciiPointerEase;
-          const [tx, ty] = target ?? [x, y];
-          // A ripple that has faded restarts at the pointer instead of sliding in from the old spot.
-          field.value = {
-            t: now,
-            x: presence > 0.01 ? x + (tx - x) * ease : tx,
-            y: presence > 0.01 ? y + (ty - y) * ease : ty,
-            presence: presence + ((active ? 1 : 0) - presence) * ease,
-          };
-          afterView(layout.asciiFrameMs, tick);
-        };
-        // Deferred so the first tick runs outside this effect and subscribes it to nothing.
-        effect(() => {
-          if (paused() || running) return;
-          running = true;
-          afterView(0, tick);
-        });
-        onCleanup(() => {
-          alive = false;
-          if (node !== undefined && metricsPointerTarget?.id === node) {
-            metricsPointerTarget = undefined;
-            requestHost({ type: "metricsPointer", id: 0 });
-          }
-        });
-        return (
-          <Column ref={(id) => { node = id; }} style={{ grow: 1 }}>
-            <For each={() => Array.from({ length: rowCount() }, (_, row) => row)} key={(row) => row}>
-              {(row) => {
-                const spans = (): Span[] => {
-                  const r = row();
-                  const cols = colCount();
-                  const { t, x: px, y: py, presence } = field.value;
-                  const dark = themeMode.value === "dark";
-                  const base = withAlpha(palette().textMuted, dark ? layout.asciiBaseAlphaDark : layout.asciiBaseAlphaLight);
-                  const peak = withAlpha(accent().brandText, dark ? layout.asciiAccentAlphaDark : layout.asciiAccentAlphaLight);
-                  const ny = (r + 0.5) * layout.asciiCellH / height();
-                  const width = panelWidth();
-                  const radius = layout.asciiPointerRadius;
-                  const dy = (r + 0.5) * layout.asciiCellH - py;
-                  // Rows out of the pointer's reach skip the ripple math.
-                  const lit = presence > 0.01 && Math.abs(dy) < radius * 2.5;
-                  const out: Span[] = [];
-                  let text = "";
-                  let color = base;
-                  for (let c = 0; c < cols; c++) {
-                    const nx = (c + 0.5) * layout.asciiCellW / width;
-                    const dist = Math.hypot((nx - 0.5) / 0.34, (ny - 0.52) / 0.30);
-                    const quiet = Math.max(0, Math.min(1, (dist - 0.55) / 0.85));
-                    const wave = (Math.sin(c * 0.22 + r * 0.18 + t * layout.asciiDrift)
-                      + Math.cos(r * 0.34 + c * 0.09 - t * layout.asciiDrift * 0.7)) * 0.25 + 0.5;
-                    let intensity = quiet * wave;
-                    if (lit) {
-                      const d = Math.hypot((c + 0.5) * layout.asciiCellW - px, dy);
-                      const falloff = Math.exp(-(d * d) / (radius * radius));
-                      const ripple = 0.6 + 0.4 * Math.sin(d * layout.asciiRippleScale - t * layout.asciiRippleSpeed);
-                      intensity = Math.min(1, intensity + presence * falloff * ripple * (1 - intensity * 0.5));
-                    }
-                    const index = Math.min(ASCII_RAMP.length - 1, Math.floor(intensity * ASCII_RAMP.length));
-                    const nextColor = intensity > 0.52 ? peak : base;
-                    if (nextColor !== color && text.length > 0) {
-                      out.push({ text, color });
-                      text = "";
-                    }
-                    color = nextColor;
-                    text += ASCII_RAMP[index] + " ";
-                  }
-                  out.push({ text, color });
-                  return out;
-                };
-                return (
-                  <Text
-                    lines={1}
-                    style={{ height: layout.asciiCellH, shrink: 0 }}
-                    font={{ family: fontFamilies.mono, size: typeScale.caption, lineHeight: 1 }}
-                    spans={spans}
-                  >
-                    {" "}
-                  </Text>
-                );
-              }}
-            </For>
-          </Column>
-        );
-      }}
-    </Show>
-  );
-}
-
 function EmptyWorkspace(props: { width: () => number }): Element {
   const layout = emptyWorkspaceLayout;
   const inset = emptyStateLayout.padding;
@@ -635,8 +669,14 @@ function EmptyWorkspace(props: { width: () => number }): Element {
 // Resize and drop previews share the same geometry as the rendered layout.
 type TilingRect = [number, number, number, number];
 
+// Only one pane filling the whole view drops the window chrome; a lone column narrower than the
+// view, or one maximized with niri `maximize-column`, is a niri window like any other (card, gaps,
+// header). Fullscreen is the gapless mode.
 function hasTilingGaps(view: TilingView): boolean {
-  return !view.maximized && (view.columns.length > 1 || (view.columns[0]?.panes.length ?? 0) > 1);
+  if (view.maximized || view.columns.length === 0) return false;
+  const [lone] = view.columns;
+  // 1e-3: the core's widths are f32 fractions.
+  return view.columns.length > 1 || lone.panes.length > 1 || lone.width < 1 - 1e-3 || lone.expanded;
 }
 
 // Niri fullscreen: the focused column grows to the whole area and pushes its neighbours out of

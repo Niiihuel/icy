@@ -19,8 +19,8 @@ El servidor de sesión es local y conserva las terminales mientras sigue en ejec
 
 ### Editor integrado
 
-- Abre un archivo desde **Files**. Arrastra en la vista previa para seleccionar líneas, o usa **Edit** para escribir y seleccionar caracteres con el editor nativo de JSNIR. Guarda con el botón de confirmación o `Ctrl+S` (`Cmd+S` en macOS).
-- **Send to CLI…** lista las sesiones de agentes activas del proyecto. Pega la ruta, el rango de líneas y el fragmento en la sesión elegida, sin pulsar Enter. Si el CLI no admite pegado delimitado, usa **Copy context** y pégalo a mano.
+- Abre un archivo desde **Files**. El archivo se lee con resaltado y números de línea. Arrastrá para seleccionar, `Ctrl+A` selecciona todo y `Ctrl+C` copia (sin selección, copia la línea). Para editar, escribí, pegá o hacé doble clic: el editor nativo de JSNIR se abre con el cursor en ese punto. `Ctrl+S` (`Cmd+S` en macOS) guarda y `Esc` vuelve a la lectura si no hay cambios sin guardar.
+- Con una selección aparece **Add to Chat** (`Ctrl+L`): pega la ruta, el rango de líneas y el fragmento en el CLI del proyecto enfocado más recientemente, sin pulsar Enter. Si hay varios y ninguno fue enfocado, abre la lista de sesiones, que también ofrece **Copy context**.
 - Los `.ttf` y `.otf` tienen vista previa de solo lectura sin instalar la fuente. Los binarios, los archivos demasiado grandes y los textos que JSNIR no puede editar sin modificar su formato se pueden abrir con **Open in…**.
 
 ## Requisitos locales

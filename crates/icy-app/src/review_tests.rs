@@ -35,6 +35,159 @@ fn workspaces_button_draws_the_grid_glyph() {
 }
 
 #[test]
+fn pixel_blast_follows_empty_workspace_theme_and_input() {
+    use crate::pixel_blast::{PixelBlast, Slot};
+
+    let script = format!(
+        r#"{APP}
+        const appHandler = hostHandler;
+        onHost(message => {{
+          if (message.view === "testOverview") overviewOpen2.value = message.data;
+          else appHandler?.(message);
+        }});
+        "#
+    );
+    let mut host = Host::with_request_handler(script, "{}".into(), TextEngine::default(), |_| {
+        Ok("ok".into())
+    })
+    .unwrap();
+    host.set_reduced_motion(true);
+    pixel_blast::install_masks(&mut host);
+    let push_tiling = |host: &mut Host, tiling: &Workspaces| {
+        host.push(json!({"view": "tiling", "data": tiling.snapshot()}).to_string());
+    };
+    let mut tiling = Workspaces::empty(TilingMode::Niri);
+    push_tiling(&mut host, &tiling);
+    let empty = frame(&mut host).items;
+    let slot = |items: &[Item]| items.iter().find_map(Slot::from_item);
+    assert!(slot(&empty).is_some());
+
+    let points = |items: &[Item]| {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Fill {
+                    top,
+                    rect,
+                    round_clip: Some((panel, _)),
+                    ..
+                } if rect[2] == rect[3] && rect[2] < 8. && panel[2] > 300. => Some((*rect, *top)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let now = Instant::now();
+    let mut idle = PixelBlast::default();
+    let mut clicked = PixelBlast::default();
+    let mut idle_items = empty.clone();
+    let mut clicked_items = empty.clone();
+    idle.paint(&mut idle_items, now, None, true);
+    clicked.paint(&mut clicked_items, now, None, true);
+    clicked.press([470., 285.]);
+    let later = now + Duration::from_millis(34);
+    idle_items = empty.clone();
+    clicked_items = empty.clone();
+    idle.paint(&mut idle_items, later, None, true);
+    clicked.paint(&mut clicked_items, later, None, true);
+    assert!(slot(&clicked_items).is_none());
+    assert!(points(&clicked_items).len() > points(&idle_items).len());
+
+    let cfg = IcyConfig {
+        mode: "light".into(),
+        accent: "rose".into(),
+        ..IcyConfig::default()
+    };
+    host.push(json!({"view": "config", "data": cfg}).to_string());
+    let light = frame(&mut host).items;
+    assert_ne!(slot(&empty), slot(&light));
+    host.push(json!({"view": "modalKey", "data": "panel.side"}).to_string());
+    let mut modal = frame(&mut host).items;
+    assert_ne!(slot(&light), slot(&modal));
+    assert!(slot(&modal).is_some());
+    assert_eq!(
+        clicked.paint(&mut modal, later, Some([470., 285.]), true),
+        None
+    );
+
+    host.push(json!({"view": "testOverview", "data": true}).to_string());
+    assert!(slot(&frame(&mut host).items).is_none());
+    host.push(json!({"view": "testOverview", "data": false}).to_string());
+    tiling.open_pane(2, false);
+    push_tiling(&mut host, &tiling);
+    assert!(slot(&frame(&mut host).items).is_none());
+}
+
+#[test]
+fn tooltip_caret_overlaps_the_bubble_after_placement_and_flip() {
+    let glyphs = icons::load_static(1.25);
+    for (top, glyph, flipped) in [
+        (88., "glyph:caret-up", false),
+        (772., "glyph:caret-down", true),
+    ] {
+        let script = format!(
+            r#"{APP}
+            mount(() => Box({{ children: HintTooltip({{
+                label: 'Close release notes', side: 'bottom', delay: 0,
+                style: {{ position: 'absolute', left: 607, top: {top}, width: 24, height: 24 }},
+                children: Box({{ style: {{ grow: 1 }}, paint: {{ background: 0x202020ff }} }}),
+            }}) }}));
+            "#
+        );
+        let mut host =
+            Host::with_request_handler(script, "{}".into(), TextEngine::default(), |_| {
+                Ok("ok".into())
+            })
+            .unwrap();
+        host.set_reduced_motion(true);
+        for (source, rgba, size) in glyphs
+            .iter()
+            .filter(|entry| entry.0.starts_with("glyph:caret-"))
+        {
+            host.set_image(source.clone(), rgba.clone(), *size);
+        }
+        let pixels = &glyphs.iter().find(|entry| entry.0 == glyph).unwrap().1;
+        frame(&mut host);
+        host.pointer_move(Some([619., top + 12.]));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            host.poll();
+            let rendered = host.frame(640., 800., 1.25, 4096);
+            assert!(host.dev_error().is_none(), "{:?}", host.dev_error());
+            let caret = rendered.items.iter().find_map(|item| match item {
+                Item::Image {
+                    image,
+                    rect,
+                    tint,
+                    clip,
+                    ..
+                } if image.rgba.as_ref() == pixels => Some((*rect, *tint, *clip)),
+                _ => None,
+            });
+            if let Some(([x, y, w, h], tint, clip)) = caret {
+                let [bx, by, bw, bh] = rendered
+                    .items
+                    .iter()
+                    .find_map(|item| match item {
+                        Item::Fill { rect, top, .. } if *top == tint => Some(*rect),
+                        _ => None,
+                    })
+                    .expect("tooltip bubble");
+                let overlap = if flipped { by + bh - y } else { y + h - by };
+                assert!((0.5..=1.5).contains(&overlap), "caret overlap: {overlap}px");
+                assert!(x >= bx + 5.5 && x + w <= bx + bw - 5.5);
+                assert!(clip[1] <= y && clip[1] + clip[3] >= y + h);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "tooltip caret did not appear at {top}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+#[test]
 fn release_notes_glow_follows_hover_and_recolors_when_the_theme_changes() {
     let script = format!(
         r#"{APP}
@@ -127,7 +280,7 @@ fn release_notes_glow_follows_hover_and_recolors_when_the_theme_changes() {
 }
 
 #[test]
-fn release_notes_cover_switches_between_ascii_image_and_inline_video() {
+fn release_notes_cover_switches_between_art_image_and_inline_video() {
     use jsnir::editor::PointSelection;
 
     const POSTER: &str = "https://example.com/workspace.png";
@@ -152,13 +305,14 @@ fn release_notes_cover_switches_between_ascii_image_and_inline_video() {
         .unwrap();
     host.set_reduced_motion(true);
     install_fonts(&mut host);
+    pixel_blast::install_masks(&mut host);
     host.set_image("test:cover".into(), PICTURE.to_vec(), [1, 1]);
     host.set_image("glyph:play".into(), PLAY.to_vec(), [1, 1]);
 
-    let has_ascii = |frame: &Frame| {
+    let has_art = |frame: &Frame| {
         frame.items.iter().any(|item| {
             matches!(item,
-        Item::Text { text, .. } if text.contains("*----+----+"))
+                Item::Fill { mask: Some((image, _)), rect, .. } if image.size == [1, 1] && rect[2] == 520.)
         })
     };
     let picture = |frame: &Frame, marker: [u8; 4]| {
@@ -169,7 +323,21 @@ fn release_notes_cover_switches_between_ascii_image_and_inline_video() {
             _ => None,
         })
     };
-    assert!(has_ascii(&frame(&mut host)));
+    let cover = frame(&mut host);
+    assert!(has_art(&cover));
+    let now = std::time::Instant::now();
+    let mut items = cover.items.clone();
+    assert!(
+        pixel_blast::PixelBlast::default()
+            .paint(&mut items, now, None, true)
+            .is_none()
+    );
+    assert!(
+        pixel_blast::PixelBlast::release()
+            .paint(&mut items, now, None, true)
+            .is_some()
+    );
+    assert!(!has_art(&Frame { items, ..cover }));
 
     let mut state = updater::UpdateState::initial();
     state.notes.media.push(updater::ReleaseMedia {
@@ -181,7 +349,10 @@ fn release_notes_cover_switches_between_ascii_image_and_inline_video() {
         poster_url: None,
     });
     host.push(json!({"view": "update", "data": &state}).to_string());
-    frame(&mut host);
+    assert!(
+        has_art(&frame(&mut host)),
+        "art remains while the image loads"
+    );
     assert!(
         rx.try_iter()
             .any(|request| request == json!({"type": "releaseCover", "url": POSTER}))
@@ -196,7 +367,7 @@ fn release_notes_cover_switches_between_ascii_image_and_inline_video() {
     let (cover, clip) = picture(&still, PICTURE).expect("image cover");
     assert_eq!(cover[2], 520.);
     assert!(cover[3] > clip[3], "a square source is center-cropped");
-    assert!(!has_ascii(&still));
+    assert!(!has_art(&still));
 
     let media = &mut state.notes.media[0];
     media.kind = "video".into();
@@ -259,7 +430,11 @@ fn terminal_right_edge_stays_in_one_column_and_pty_fits_its_viewport() {
         "\x1b[48;2;17;34;51m┌───┐\x1b[77G\x1b[31m│\r\n\x1b[39m☆雪e\u{301}\x1b[77G\x1b[31m│"
             .as_bytes(),
     );
-    let rows = terminal_rows_payload(&vt.snapshot().rows, Path::new("."));
+    let rows = terminal_rows_payload(
+        &vt.snapshot().rows,
+        Path::new("."),
+        &TerminalRowCache::default(),
+    );
     let data = json!({"cols":77,"rowsCount":6,"cursorRow":1,"cursorCol":76,"cursorVisible":true,"rows":rows});
     let (tx, rx) = mpsc::channel();
     let mut host = Host::with_request_handler(
@@ -337,7 +512,7 @@ fn sessions_render_reported_activity_even_when_the_cli_title_does_not_change() {
 }
 
 #[test]
-fn alt_agent_digits_follow_the_visible_sort_and_filter() {
+fn alt_agent_digits_follow_the_visible_sort_and_filter_without_replacing_icons() {
     let script = format!(
         r#"{APP}
         mount(PriorityAgents);
@@ -354,6 +529,14 @@ fn alt_agent_digits_follow_the_visible_sort_and_filter() {
         })
         .unwrap();
     install_fonts(&mut host);
+    let logos = [
+        ("cli:codex", [1, 11, 21, 255]),
+        ("cli:opencode", [2, 12, 22, 255]),
+        ("cli:claude", [3, 13, 23, 255]),
+    ];
+    for (source, marker) in logos {
+        host.set_image(source.into(), marker.to_vec(), [1, 1]);
+    }
     host.push(
         json!({"view":"sessions","data":{"activeId":2,"items":[
             {"id":2,"title":"Waiting","cli":"codex","alive":true,"cwd":"/test","status":"idle"},
@@ -364,15 +547,12 @@ fn alt_agent_digits_follow_the_visible_sort_and_filter() {
     );
     host.push(json!({"view":"agentDigitsHeld","data":true}).to_string());
     let active = frame(&mut host);
-    let text_labels: Vec<_> = active
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert!(text_labels.contains(&"3"), "{text_labels:?}");
+    for (_, marker) in logos {
+        assert!(active.items.iter().any(|item| matches!(item,
+            Item::Image { image, .. } if image.rgba.as_ref() == marker)));
+    }
+    assert!(!active.items.iter().any(|item| matches!(item,
+        Item::Text { text, .. } if text == "3")));
     host.push(json!({"view":"agentDigit","data":1}).to_string());
     frame(&mut host);
     assert!(
@@ -386,12 +566,193 @@ fn alt_agent_digits_follow_the_visible_sort_and_filter() {
         rx.try_iter()
             .any(|request| request["type"] == "selectSession" && request["id"] == 3)
     );
-    host.push(json!({"view":"agentDigitsHeld","data":false}).to_string());
-    assert!(
-        !frame(&mut host)
+}
+
+#[test]
+fn overflow_fade_tracks_the_available_width_without_moving_titles() {
+    let script = format!(
+        r#"{APP}
+        const titleWidth = signal(90);
+        onHost(message => {{ titleWidth.value = message.width; }});
+        mount(() => Column({{ children: [
+            Box({{ style: () => ({{ width: titleWidth.value }}), children: FadeText({{
+                text: 'A long session title that needs more room', font: {{size: 13}},
+                background: () => palette().appBg, layoutChanged: () => {{ void titleWidth.value; }},
+            }}) }}),
+            Box({{ style: {{ width: 90 }}, children: FadeText({{
+                text: 'Short', font: {{size: 13}}, background: () => palette().appBg,
+            }}) }}),
+        ] }}));
+        "#
+    );
+    let mut host = Host::with_request_handler(script, "{}".into(), TextEngine::default(), |_| {
+        Ok("ok".into())
+    })
+    .unwrap();
+    let (source, pixels, size) = icons::load_static(1.0)
+        .into_iter()
+        .find(|(key, _, _)| key == "ui:text-fade")
+        .unwrap();
+    host.set_image(source, pixels.clone(), size);
+    let fade_rects = |drawn: &Frame| {
+        drawn
             .items
             .iter()
-            .any(|item| matches!(item, Item::Text { text, .. } if text == "3"))
+            .filter_map(|item| match item {
+                Item::Image { image, rect, .. } if image.rgba.as_ref() == pixels => Some(*rect),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let title_rect = |drawn: &Frame| {
+        drawn
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text { text, rect, .. } if text.starts_with("A long session title") => {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    frame(&mut host);
+    std::thread::sleep(Duration::from_millis(40));
+    let narrow = frame(&mut host);
+    let fades = fade_rects(&narrow);
+    assert_eq!(fades.len(), 1);
+    assert_eq!(fades[0][0] + fades[0][2], 90.);
+    assert_eq!(title_rect(&narrow)[0], title_rect(&frame(&mut host))[0]);
+    assert!(!narrow.animating);
+
+    host.push(json!({"width": 440}).to_string());
+    frame(&mut host);
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(fade_rects(&frame(&mut host)).is_empty());
+}
+
+#[test]
+fn session_menu_archives_and_archived_view_restores_the_same_id() {
+    use jsnir::editor::PointSelection;
+
+    let (tx, rx) = mpsc::channel();
+    let mut host = Host::with_request_handler(
+        format!(
+            r#"{APP}
+            mount(() => Row({{ children: [
+                Column({{ style: {{ width: 224, shrink: 0 }}, children: PriorityAgents() }}),
+                ArchivedView(),
+            ] }}));"#
+        ),
+        "{}".into(),
+        TextEngine::default(),
+        move |raw| {
+            tx.send(serde_json::from_str::<Value>(&raw).unwrap())
+                .unwrap();
+            Ok("ok".into())
+        },
+    )
+    .unwrap();
+    host.set_reduced_motion(true);
+    install_fonts(&mut host);
+    let more = [13, 24, 35, 255];
+    host.set_image("glyph:more-horizontal".into(), more.to_vec(), [1, 1]);
+    let session = json!({"id": 42, "title": "Live task", "cli": "codex", "cwd": "/project",
+        "alive": true, "status": "working"});
+    let other = json!({"id": 43, "title": "Second task", "cli": "codex", "cwd": "/project",
+        "alive": true, "status": "working"});
+    host.push(
+        json!({"view": "sessions", "data": {"activeId": 43, "items": [session, other]}})
+            .to_string(),
+    );
+
+    let label = |frame: &Frame, name: &str| {
+        frame.items.iter().find_map(|item| match item {
+            Item::Text { text, rect, .. } if text == name => Some(*rect),
+            _ => None,
+        })
+    };
+    let point = |[x, y, w, h]: [f32; 4]| [x + w / 2., y + h / 2.];
+    let click = |host: &mut Host, at| {
+        host.pointer_move(Some(at));
+        host.pointer_down(PointSelection::Place);
+        host.pointer_up();
+        frame(host)
+    };
+    let drawn = frame(&mut host);
+    let empty = label(&drawn, "No archived sessions").expect("archive empty state");
+    assert!(
+        empty[1] > 250. && empty[1] < 550.,
+        "empty state is centered vertically"
+    );
+    let ellipses = |frame: &Frame| {
+        frame
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Image { image, rect, .. } if image.rgba.as_ref() == more => Some(*rect),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        ellipses(&drawn).is_empty(),
+        "even the focused session hides its ellipsis at rest"
+    );
+    let row = label(&drawn, "project · Live task").expect("inactive running session");
+    host.pointer_move(Some(point(row)));
+    let [dots] = ellipses(&frame(&mut host))
+        .try_into()
+        .expect("only the hovered row shows its ellipsis");
+    host.pointer_move(Some(point(dots)));
+    let hovered_button = frame(&mut host);
+    assert!(
+        hovered_button.items.iter().any(|item| matches!(item,
+            Item::Fill { rect, top: [31, 31, 34, 255], .. }
+                if rect[2] > 150. && rect[1] <= dots[1] && rect[1] + rect[3] >= dots[1] + dots[3]
+        )),
+        "the session keeps its hover when the pointer moves onto the menu button"
+    );
+    assert!(
+        hovered_button.items.iter().any(|item| matches!(item,
+            Item::Fill { rect, top: [250, 250, 250, 13], .. }
+                if rect[2] < 30. && rect[0] <= dots[0] && rect[0] + rect[2] >= dots[0] + dots[2]
+        )),
+        "the menu button draws a separate hover over the session"
+    );
+    let menu = click(&mut host, point(dots));
+    let archive = label(&menu, "Archive session").expect("archive action in the ellipsis menu");
+    click(&mut host, point(archive));
+    let requests: Vec<_> = rx.try_iter().collect();
+    assert!(
+        requests
+            .iter()
+            .any(|r| *r == json!({"type": "archiveSession", "id": 42}))
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r["type"] == "selectSession" || r["type"] == "closeSession")
+    );
+
+    let mut archived = session;
+    archived["archivedAt"] = json!(0);
+    host.push(
+        json!({"view": "sessions", "data": {"activeId": 0, "items": [], "archived": [archived]}})
+            .to_string(),
+    );
+    let drawn = frame(&mut host);
+    assert!(label(&drawn, "No archived sessions").is_none());
+    let row = label(&drawn, "Live task").expect("archived session");
+    host.pointer_move(Some(point(row)));
+    host.context_press();
+    let menu = frame(&mut host);
+    assert!(label(&menu, "Remove exited session").is_none());
+    let restore = label(&menu, "Restore session").expect("restore action in the context menu");
+    click(&mut host, point(restore));
+    assert!(
+        rx.try_iter()
+            .any(|r| r == json!({"type": "restoreSession", "id": 42}))
     );
 }
 
@@ -437,8 +798,11 @@ fn source_editor_drag_selections_and_native_edits() {
           {{ id: 44, title: 'Other project', cli: 'codex', cwd: '/other', alive: true }},
           {{ id: 45, title: 'Plain shell', cli: 'terminal', cwd: '/project', alive: true }}
         ] }};
+        activeNav.value = 'agents';
+        tileSpecs.value = {{ 900: spec }};
+        tilingState.value = {{ ...tilingState.value, focusedSession: 900 }};
         mount(() => SourceEditor({{ spec, doc: () => fixture }}));
-        onHost(() => saveEditorDraft(editorDrafts.get(docKey(spec))));
+        onHost((message) => {{ if (message.view === 'editorKey') receiveEditorKey(message.data); else saveEditorDraft(editorDrafts.get(docKey(spec))); }});
         if (editorSelection('test.txt', '🌊ab\nc', [5, 1]) !== 'test.txt:1-2\n\nab\nc') throw new Error('wrong Unicode selection');
         "#
     );
@@ -488,8 +852,17 @@ fn source_editor_drag_selections_and_native_edits() {
     host.pointer_move(Some(edge(&initial, "three", true)));
     host.pointer_up();
     let selected = frame(&mut host);
-    text_point(&selected, "Lines 1–3");
-    host.pointer_move(Some(text_point(&selected, "Send to CLI…")));
+    // No header: the chip is the way to the CLIs.
+    for gone in ["Lines 1–3", "Send to CLI…", "Edit", "Drag to select"] {
+        assert!(
+            !selected
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Text { text, .. } if text == gone)),
+            "{gone}"
+        );
+    }
+    host.pointer_move(Some(text_point(&selected, "Add to Chat")));
     host.pointer_down(jsnir::editor::PointSelection::Place);
     host.pointer_up();
     let menu = frame(&mut host);
@@ -504,9 +877,10 @@ fn source_editor_drag_selections_and_native_edits() {
         .unwrap();
     assert_eq!(paste["id"], 42);
     assert_eq!(paste["text"], "test.txt:1-3\n\none\ntwo 🌊\nthree");
-    host.pointer_move(Some(text_point(&selected, "Edit")));
-    host.pointer_down(jsnir::editor::PointSelection::Place);
-    host.pointer_up();
+    let _ = selected;
+    // Typing over the selection on the read view opens the editor with the key applied and the
+    // caret right after it.
+    host.push(json!({"view": "editorKey", "data": {"insert": "X"}}).to_string());
     frame(&mut host);
     assert!(host.focused());
     host.edit(&[jsnir::editor::EditorEvent::Insert("extra".into())]);
@@ -515,7 +889,162 @@ fn source_editor_drag_selections_and_native_edits() {
     frame(&mut host);
     let request = rx.try_iter().find(|v| v["type"] == "saveEditor").unwrap();
     assert_eq!(request["expected"], "one\ntwo 🌊\nthree\n");
-    assert_eq!(request["text"], "one\ntwo 🌊\nthree\nextra");
+    assert_eq!(request["text"], "Xextra\n");
+}
+
+#[test]
+fn source_editor_read_view_keys_and_joined_selection() {
+    let script = format!(
+        r#"{APP}
+        const spec = {{ kind: 'file', path: 'test.txt', cwd: '/project' }};
+        const fixture = {{ path: '/project/test.txt', displayPath: 'test.txt', editableText: 'one\ntwo 🌊\nthree\n',
+          lines: ['one', 'two 🌊', 'three'].map((text, i) => ({{ num: i + 1, text }})) }};
+        activeNav.value = 'agents';
+        tileSpecs.value = {{ 900: spec }};
+        tilingState.value = {{ ...tilingState.value, focusedSession: 900 }};
+        mount(() => SourceEditor({{ spec, doc: () => fixture }}));
+        onHost((message) => {{
+          if (message.view === 'editorKey') receiveEditorKey(message.data);
+          if (message.view === 'saveDraft') saveEditorDraft(editorDrafts.get(docKey(spec)));
+        }});
+        "#
+    );
+    let (tx, rx) = mpsc::channel();
+    let mut host =
+        Host::with_request_handler(script, "{}".into(), TextEngine::default(), move |raw| {
+            tx.send(serde_json::from_str::<Value>(&raw).unwrap())
+                .unwrap();
+            Ok("ok".into())
+        })
+        .unwrap();
+    install_fonts(&mut host);
+    let key = |host: &mut Host, data: Value| {
+        host.push(json!({"view": "editorKey", "data": data}).to_string());
+        frame(host)
+    };
+    let fills = |frame: &Frame| {
+        frame
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Fill { rect, radius, .. } if rect[0] > 40. => Some((*rect, radius[0])),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let initial = frame(&mut host);
+    assert!(
+        rx.try_iter()
+            .any(|v| v == json!({"type": "editorPreview", "on": true}))
+    );
+    let before = fills(&initial).len();
+
+    // Ctrl+A: square fills, each row starting where the previous ends (no seam). A row the
+    // selection continues past also fills its line break: one cell right after the text, as VS Code.
+    let all = key(&mut host, json!({"command": "selectAll"}));
+    let selection = fills(&all);
+    assert_eq!(selection.len(), before + 5, "{selection:?}");
+    let lines = &selection[selection.len() - 5..];
+    assert!(lines.iter().all(|(_, radius)| *radius == 0.), "{lines:?}");
+    for row in [&lines[0..2], &lines[2..4]] {
+        let (text, wrap) = (row[0].0, row[1].0);
+        assert!((text[0] + text[2] - wrap[0]).abs() < 0.01, "{row:?}");
+        assert_eq!(text[1], wrap[1]);
+    }
+    let rows = [lines[0].0, lines[2].0, lines[4].0];
+    for pair in rows.windows(2) {
+        assert_eq!(pair[0][1] + pair[0][3], pair[1][1]);
+        assert_eq!(pair[0][3].fract(), 0.);
+    }
+    key(&mut host, json!({"command": "copy"}));
+    assert!(
+        rx.try_iter()
+            .any(|v| v == json!({"type": "copyText", "text": "one\ntwo 🌊\nthree"}))
+    );
+
+    // Esc clears it; Ctrl+C without a selection copies the caret's line, like VS Code.
+    let cleared = key(&mut host, json!({"command": "escape"}));
+    assert_eq!(fills(&cleared).len(), before);
+    key(&mut host, json!({"command": "copy"}));
+    assert!(
+        rx.try_iter()
+            .any(|v| v == json!({"type": "copyText", "text": "one\n"}))
+    );
+
+    // Enter on the read view opens the editor at the caret (line 1, column 1) with the break applied.
+    key(&mut host, json!({"insert": "\n"}));
+    assert!(host.focused());
+    assert!(
+        rx.try_iter()
+            .any(|v| v == json!({"type": "editorPreview", "on": false}))
+    );
+    host.edit(&[jsnir::editor::EditorEvent::Insert("zero".into())]);
+    frame(&mut host);
+    host.push(json!({"view": "saveDraft"}).to_string());
+    frame(&mut host);
+    let request = rx.try_iter().find(|v| v["type"] == "saveEditor").unwrap();
+    assert_eq!(request["text"], "\nzeroone\ntwo 🌊\nthree\n");
+}
+
+#[test]
+fn source_editor_double_click_edits_at_the_pointer_and_escape_returns() {
+    let script = format!(
+        r#"{APP}
+        const spec = {{ kind: 'file', path: 'test.txt', cwd: '/project' }};
+        const fixture = {{ path: '/project/test.txt', displayPath: 'test.txt', editableText: 'one\ntwo\n',
+          lines: ['one', 'two'].map((text, i) => ({{ num: i + 1, text }})) }};
+        activeNav.value = 'agents';
+        tileSpecs.value = {{ 900: spec }};
+        tilingState.value = {{ ...tilingState.value, focusedSession: 900 }};
+        mount(() => SourceEditor({{ spec, doc: () => fixture }}));
+        onHost((message) => {{
+          if (message.view === 'editorKey') receiveEditorKey(message.data);
+          if (message.view === 'saveDraft') saveEditorDraft(editorDrafts.get(docKey(spec)));
+        }});
+        "#
+    );
+    let (tx, rx) = mpsc::channel();
+    let mut host =
+        Host::with_request_handler(script, "{}".into(), TextEngine::default(), move |raw| {
+            tx.send(serde_json::from_str::<Value>(&raw).unwrap())
+                .unwrap();
+            Ok("ok".into())
+        })
+        .unwrap();
+    install_fonts(&mut host);
+    let initial = frame(&mut host);
+    let two = initial
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Text { text, rect, .. } if text == "two" => Some(*rect),
+            _ => None,
+        })
+        .unwrap();
+    // Between "t" and "wo".
+    let at = [two[0] + 7.5 + 1., two[1] + two[3] / 2.];
+    let double_click = |host: &mut Host| {
+        for _ in 0..2 {
+            host.pointer_move(Some(at));
+            host.pointer_down(jsnir::editor::PointSelection::Place);
+            host.pointer_up();
+            host.poll();
+        }
+        frame(host);
+    };
+    double_click(&mut host);
+    assert!(host.focused());
+    host.push(json!({"view": "editorKey", "data": {"command": "escape"}}).to_string());
+    frame(&mut host);
+    assert!(!host.focused(), "a clean editor returns to the read view");
+
+    double_click(&mut host);
+    host.edit(&[jsnir::editor::EditorEvent::Insert("X".into())]);
+    frame(&mut host);
+    host.push(json!({"view": "saveDraft"}).to_string());
+    frame(&mut host);
+    let request = rx.try_iter().find(|v| v["type"] == "saveEditor").unwrap();
+    assert_eq!(request["text"], "one\ntXwo\n");
 }
 
 #[test]
@@ -783,6 +1312,7 @@ fn document_loader_returns_background_results_without_ui_work() {
             old_line: false,
             edit: None,
             background: true,
+            intent: None,
         },
         tx,
     )
@@ -841,7 +1371,7 @@ fn terminal_edit_link_opens_the_changed_hunk_beyond_twenty_thousand_lines() {
 
     let mut vt = AlacrittyVt::new(34, 10);
     vt.feed("└ Updated sample.rs +1 -1\r\n  20899   // line 20899\r\n  20900 -// line 20900\r\n  20900 +fn edited_in_terminal() {}\r\nSee sample.rs:20899".as_bytes());
-    let rows = terminal_rows_payload(&vt.snapshot().rows, &cwd);
+    let rows = terminal_rows_payload(&vt.snapshot().rows, &cwd, &TerminalRowCache::default());
     assert_eq!(rows[0].links[0].kind, RefKind::Diff);
     assert_eq!(rows[0].links[0].line, Some(20_900));
     assert_eq!(rows[5].links[0].kind, RefKind::File);
@@ -963,10 +1493,15 @@ fn launcher_and_session_search_keep_the_tiling_until_selection() {
             let request: Value = serde_json::from_str(&raw).unwrap();
             let response = match request["type"].as_str() {
                 Some("openTile") => "3".into(),
-                Some("browseProject") => json!({
-                    "path": "/project", "parent": "/", "ancestors": [], "folders": []
-                })
-                .to_string(),
+                Some("browseProject") => {
+                    if request["path"] == "/project/api/" {
+                        json!({"path": "/project/api", "parent": "/project", "ancestors": [], "folders": []})
+                    } else {
+                        json!({"path": "/project", "parent": "/", "ancestors": [],
+                            "folders": [{"name": "api", "path": "/project/api"}]})
+                    }
+                    .to_string()
+                }
                 _ => "ok".into(),
             };
             tx.send(request).unwrap();
@@ -1041,13 +1576,20 @@ fn launcher_and_session_search_keep_the_tiling_until_selection() {
     let launcher = click(&mut host, plus);
     assert!(label(&launcher, "Search or enter a URL").is_some());
     assert!(host.focused());
-    let terminal = label(&launcher, "Terminal").unwrap();
-    let open_file = label(&launcher, "Open File").unwrap();
-    host.pointer_move(Some([open_file[0] + 4., open_file[1] + 4.]));
+    let docs = label(&launcher, "Docs session").unwrap();
+    let api = label(&launcher, "API session").unwrap();
+    assert_eq!(docs[1], api[1], "recent cards share a row");
+    assert!(docs[0] < api[0], "newer sessions come first");
+    key(&mut host, "down");
+    let selected_launcher = key(&mut host, "down");
+    let terminal = label(&selected_launcher, "Terminal").unwrap();
+    let claude = label(&selected_launcher, "Claude Code").unwrap();
+    host.pointer_move(Some([claude[0] + 4., claude[1] + 4.]));
     let hovered = frame(&mut host);
+    // Selection and hover are line borders (DESIGN.md, floating chrome), drawn as an inset ring.
     let row_fill = |label: [f32; 4]| {
         hovered.items.iter().find_map(|item| match item {
-            Item::Fill { rect, clip, .. }
+            Item::Inset { rect, clip, .. }
                 if rect[2] > 200.
                     && rect[3] == 44.
                     && rect[0] <= label[0]
@@ -1059,8 +1601,8 @@ fn launcher_and_session_search_keep_the_tiling_until_selection() {
             _ => None,
         })
     };
-    let (selected, list_clip) = row_fill(terminal).expect("selected row background");
-    let (hover, _) = row_fill(open_file).expect("hovered row background");
+    let (selected, list_clip) = row_fill(terminal).expect("selected row border");
+    let (hover, _) = row_fill(claude).expect("hovered row border");
     assert!((hover[1] - selected[1] - selected[3] - 4.).abs() < 0.1);
     let thumb = hovered
         .items
@@ -1078,13 +1620,13 @@ fn launcher_and_session_search_keep_the_tiling_until_selection() {
     assert!((thumb[0] - hover[0] - hover[2] - 4.).abs() < 0.1);
     assert!(host.wheel_smooth(40.), "launcher accepts the mouse wheel");
     let scrolled = frame(&mut host);
-    let scrolled_file = label(&scrolled, "Open File").unwrap();
-    assert!(scrolled_file[1] < open_file[1]);
+    let scrolled_agent = label(&scrolled, "Claude Code").unwrap();
+    assert!(scrolled_agent[1] < claude[1]);
     assert!(host.wheel(12.), "launcher accepts a touchpad delta");
-    let scrolled_file = label(&frame(&mut host), "Open File").unwrap();
+    let scrolled_agent = label(&frame(&mut host), "Claude Code").unwrap();
     host.push(json!({"view": "screen", "data": screen}).to_string());
     let updated = frame(&mut host);
-    assert_eq!(label(&updated, "Open File").unwrap(), scrolled_file);
+    assert_eq!(label(&updated, "Claude Code").unwrap(), scrolled_agent);
     let cancelled = click(&mut host, [0., 0., 1., 1.]);
     assert!(label(&cancelled, "Search or enter a URL").is_none());
     assert!(!host.focused());
@@ -1129,22 +1671,56 @@ fn launcher_and_session_search_keep_the_tiling_until_selection() {
     );
     key(&mut host, "session.search");
     let switched = key(&mut host, "panel.side");
-    assert!(label(&switched, "Search or enter a URL").is_some());
+    assert_eq!(
+        label(&switched, "Search or enter a URL"),
+        label(&launcher, "Search or enter a URL")
+    );
+    assert_eq!(
+        label(&switched, "Recent sessions"),
+        label(&launcher, "Recent sessions")
+    );
     assert!(host.focused());
-    let folder = key(&mut host, "enter");
-    assert!(label(&folder, "open folder").is_some());
+    host.edit(&[EditorEvent::Insert("codex".into())]);
+    let matching = frame(&mut host);
+    rx.try_iter().for_each(drop);
+    let folder = click(&mut host, label(&matching, "Codex").unwrap());
+    assert!(label(&folder, "Launch Codex").is_some());
     assert!(host.focused());
-    assert!(!rx.try_iter().any(|r| r["type"] == "openTile"));
-    key(&mut host, "escape");
+    assert!(
+        !rx.try_iter()
+            .any(|r| matches!(r["type"].as_str(), Some("launchCli" | "paletteKeys")))
+    );
+    let back = key(&mut host, "escape");
+    assert!(host.focused());
+    assert_eq!(
+        host.ime_state().surrounding.unwrap().text,
+        "codex",
+        "the search query survives Back"
+    );
+    assert!(label(&back, "Recent sessions").is_none());
+    let folder_again = key(&mut host, "enter");
+    assert!(label(&folder_again, "Launch Codex").is_some());
+    key(&mut host, "down");
+    key(&mut host, "tab");
+    assert_eq!(host.ime_state().surrounding.unwrap().text, "/project/api/");
+    host.edit(&[EditorEvent::Enter]);
+    let launched = frame(&mut host);
+    assert!(!host.focused());
+    assert!(label(&launched, "Launch Codex").is_none());
+    let launch_requests: Vec<_> = rx.try_iter().filter(|r| r["type"] == "launchCli").collect();
+    assert_eq!(
+        launch_requests,
+        vec![json!({"type": "launchCli", "cliId": "codex", "cwd": "/project/api"})]
+    );
     key(&mut host, "panel.side");
-    key(&mut host, "down");
-    key(&mut host, "down");
+    host.edit(&[EditorEvent::Insert("open file".into())]);
+    frame(&mut host);
     key(&mut host, "enter");
     assert!(rx.try_iter().any(|r| r["type"] == "openTile"));
 
     key(&mut host, "panel.side");
-    host.edit(&[EditorEvent::Insert("expand column".into())]);
-    assert!(label(&frame(&mut host), "Expand column").is_some());
+    host.edit(&[EditorEvent::Insert("maximize column".into())]);
+    assert!(label(&frame(&mut host), "Maximize column").is_some());
     key(&mut host, "enter");
     assert!(
         rx.try_iter()
@@ -1164,8 +1740,13 @@ fn fullscreen_fills_the_workspace_when_switching_tabs() {
     let fullscreen_size = (manager.cols, manager.rows);
     assert!(fullscreen_size.0 > tiled_size.0 && fullscreen_size.1 > tiled_size.1);
 
+    let (sizes_tx, sizes) = mpsc::channel();
     let mut host =
-        Host::with_request_handler(APP.into(), "{}".into(), TextEngine::default(), |_| {
+        Host::with_request_handler(APP.into(), "{}".into(), TextEngine::default(), move |raw| {
+            let request: Value = serde_json::from_str(&raw).unwrap();
+            if request["type"] == "terminalSize" {
+                sizes_tx.send(request).unwrap();
+            }
             Ok("ok".into())
         })
         .unwrap();
@@ -1192,10 +1773,23 @@ fn fullscreen_fills_the_workspace_when_switching_tabs() {
         host.push(json!({"view": view, "data": data}).to_string());
     }
     let mut full_width = None;
+    let mut reported = BTreeSet::new();
     for id in [ids[2], ids[0], ids[1], ids[2]] {
         assert_eq!(manager.active_id(), id);
         assert_eq!((manager.cols, manager.rows), fullscreen_size);
         host.push(json!({"view": "tiling", "data": manager.tiling_snapshot()}).to_string());
+        // Fullscreen moving to this tab resizes its PTY right away, not after the spring settles.
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(200) {
+            host.poll();
+            host.frame(640., 800., 1., 4096);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let early: Vec<Value> = sizes.try_iter().collect();
+        assert!(
+            early.iter().all(|r| r["id"] == id),
+            "hidden panes resized: {early:?}"
+        );
         let rendered = frame(&mut host);
         let panes: Vec<_> = rendered
             .items
@@ -1211,11 +1805,66 @@ fn fullscreen_fills_the_workspace_when_switching_tabs() {
         assert_eq!(panes[0].0, &format!("full pane {id}"));
         let width = *full_width.get_or_insert(panes[0].1);
         assert!(width > 350. && (panes[0].1 - width).abs() < 1.);
+        let full_cols = sizes
+            .try_iter()
+            .chain(early.iter().cloned())
+            .filter(|r| r["id"] == id)
+            .map(|r| r["cols"].as_u64().unwrap())
+            .max();
+        if reported.insert(id) {
+            assert!(
+                early
+                    .last()
+                    .is_some_and(|r| Some(r["cols"].as_u64().unwrap()) == full_cols),
+                "pane {id} reported its fullscreen size late: {early:?}"
+            );
+        } else {
+            assert!(
+                early.is_empty(),
+                "the pane already has its fullscreen size: {early:?}"
+            );
+        }
         assert!(manager.step_tab(1));
     }
     assert!(manager.select_session(ids[2]));
     manager.toggle_maximize();
     assert_eq!((manager.cols, manager.rows), tiled_size);
+}
+
+#[test]
+fn overview_wheel_steps_whole_workspaces_while_arrows_walk_the_column_first() {
+    // Workspace 0: a column of panes 1 over 4; workspace 1: pane 2.
+    let mut tiling = Workspaces::new(1, TilingMode::Niri);
+    tiling.open_pane(4, true);
+    tiling.focus_workspace(1);
+    tiling.open_pane(2, false);
+    tiling.focus_session(1);
+    let (tx, rx) = mpsc::channel();
+    let mut host =
+        Host::with_request_handler(APP.into(), "{}".into(), TextEngine::default(), move |raw| {
+            tx.send(serde_json::from_str::<Value>(&raw).unwrap())
+                .unwrap();
+            Ok("ok".into())
+        })
+        .unwrap();
+    host.push(json!({"view": "tiling", "data": tiling.snapshot()}).to_string());
+    frame(&mut host);
+    let mut pick = |step: &str| {
+        for action in ["view.overview", step, "enter"] {
+            host.push(json!({"view": "modalKey", "data": action}).to_string());
+            frame(&mut host);
+        }
+        rx.try_iter()
+            .filter(|r| r["type"] == "selectSession")
+            .last()
+            .map(|r| r["id"].clone())
+    };
+    assert_eq!(pick("down"), Some(json!(4)), "the arrow walks the column");
+    assert_eq!(
+        pick("workspaceDown"),
+        Some(json!(2)),
+        "the wheel skips to the next workspace"
+    );
 }
 
 #[test]
@@ -1547,6 +2196,82 @@ fn open_tiles_do_not_highlight_sidebar_launchers() {
 }
 
 #[test]
+fn sidebar_windows_open_to_the_right_and_take_focus() {
+    use jsnir::editor::PointSelection;
+
+    let cwd = tempfile::tempdir().unwrap();
+    let mut manager = SessionManager::new(cwd.path().into(), Arc::new(|| {}));
+    manager.tiling = Workspaces::empty(TilingMode::Niri);
+    let first = manager.open_tile(false, cwd.path().into());
+    manager.toggle_maximize();
+    let manager = Arc::new(Mutex::new(manager));
+    let push_layout = |host: &mut Host| {
+        let tiling = manager.lock().unwrap().tiling_snapshot();
+        host.push(json!({"view": "tiling", "data": tiling}).to_string());
+    };
+    let (events, _rx) = mpsc::channel();
+    let requests = Arc::clone(&manager);
+    let script = format!(
+        r#"{APP}
+        viewportSize.value = [640, 800];
+        tileSpecs.value = {{ {first}: {{kind: 'overview', path: ''}} }};
+    "#
+    );
+    let mut host =
+        Host::with_request_handler(script, "{}".into(), TextEngine::default(), move |raw| {
+            let payload: Value = serde_json::from_str(&raw).unwrap();
+            match payload["type"].as_str() {
+                Some("openTile" | "selectSession") => handle_request(&raw, &requests, &events),
+                _ => Ok("ok".into()),
+            }
+        })
+        .unwrap();
+    host.set_reduced_motion(true);
+    install_fonts(&mut host);
+    push_layout(&mut host);
+
+    let mut expected = vec![first];
+    for label in ["Git", "Files", "Browser", "Git"] {
+        let sidebar = frame(&mut host);
+        let [x, y, w, h] = sidebar
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text { text, rect, .. } if text == label && rect[0] < SIDEBAR_WIDTH_PX => {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing sidebar action {label}"));
+        host.pointer_move(Some([x + w / 2., y + h / 2.]));
+        host.pointer_down(PointSelection::Place);
+        host.pointer_up();
+        frame(&mut host);
+
+        {
+            let manager = manager.lock().unwrap();
+            if label == "Git" && expected.len() == 4 {
+                assert_eq!(
+                    manager.active_id(),
+                    expected[1],
+                    "reuse and focus the open Git window"
+                );
+            } else {
+                expected.push(expected.last().unwrap() + 1);
+                assert_eq!(
+                    manager.active_id(),
+                    *expected.last().unwrap(),
+                    "focus the new {label} window"
+                );
+            }
+            assert!(manager.tiling.is_maximized());
+            assert_eq!(manager.tiling.pane_order(), expected);
+        }
+        push_layout(&mut host);
+    }
+}
+
+#[test]
 fn code_preview_loader_returns_windowed_file_and_diff_snippets() {
     let cwd = std::env::temp_dir().join(format!("icy-code-preview-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cwd);
@@ -1799,6 +2524,12 @@ fn pinned_doc_tile_stays_open_while_next_file_opens_beside_it() {
         // Re-opening b.rs focuses tile 1 and preserves its pinned state.
         openDocTile({{ kind: "file", path: "b.rs", cwd: "/project" }});
         assert(tileSpecs.value[1].path === "b.rs" && tileSpecs.value[1].pinned, "refocused tile must remain pinned");
+
+        // With a terminal focused to the right, a new file opens beside it.
+        setPanes([1, 2, 9], 9);
+        openDocTile({{ kind: "file", path: "e.rs", cwd: "/project" }});
+        assert(tileSpecs.value[2].path === "d.rs", "preview to the left was replaced");
+        assert(tileSpecs.value[3].path === "e.rs", "new file should open in tile 3");
         mount(() => Text({{ children: "passed" }}));
         "#
     );
@@ -1822,7 +2553,7 @@ fn pinned_doc_tile_stays_open_while_next_file_opens_beside_it() {
     let requests: Vec<_> = rx.try_iter().collect();
     assert_eq!(
         requests.iter().filter(|r| r["type"] == "openTile").count(),
-        1
+        2
     );
     assert!(
         requests
@@ -2061,7 +2792,7 @@ fn settle(host: &mut Host) -> (f64, bool) {
 /// `cargo test --release -p icy-app perf_ -- --ignored --nocapture`.
 #[test]
 #[ignore]
-fn perf_tab_switch_and_alt_hold() {
+fn perf_tab_switch_and_session_updates() {
     let mut tiling = Workspaces::empty(TilingMode::Niri);
     for id in 1..=8 {
         tiling.open_pane(id, false);
@@ -2120,9 +2851,6 @@ fn perf_tab_switch_and_alt_hold() {
             json!({"view": "sessions", "data": {"activeId": (i % 8) + 1, "items": items}})
                 .to_string(),
         );
-    });
-    measure(&mut host, "alt hold toggle", &mut |host, i| {
-        host.push(json!({"view": "agentDigitsHeld", "data": i % 2 == 0}).to_string());
     });
     measure(&mut host, "sessions status push", &mut |host, i| {
         let mut items = items.clone();
@@ -2326,6 +3054,36 @@ fn browser_tile_opens_draws_frames_and_shows_errors() {
 }
 
 #[test]
+fn browser_address_field_lets_go_of_the_keys_when_another_pane_takes_focus() {
+    let script = format!(
+        r#"{APP}
+        viewportSize.value = [640, 800];
+        tilingState.value = {{ ...tilingState.value, focusedSession: 7 }};
+        mount(() => BrowserView({{id: 7, spec: {{kind: "browser", path: ""}}}}));
+    "#
+    );
+    let mut host = Host::with_request_handler(script, "{}".into(), TextEngine::default(), |_| {
+        Ok("ok".into())
+    })
+    .unwrap();
+    install_fonts(&mut host);
+    let mut tiling = Workspaces::new(7, TilingMode::Niri);
+    frame(&mut host);
+    assert!(
+        host.focused(),
+        "a blank browser pane focuses its address field"
+    );
+    // A press on a tab or a terminal pane does not blur the field; the focus change must.
+    tiling.open_pane(8, false);
+    host.push(json!({"view": "tiling", "data": tiling.snapshot()}).to_string());
+    frame(&mut host);
+    assert!(
+        !host.focused(),
+        "the address field kept the keys of the focused pane"
+    );
+}
+
+#[test]
 fn browser_addresses_resolve_on_the_host_and_each_url_opens_a_pane_that_closes_with_its_tile() {
     let (tx, rx) = mpsc::channel();
     let script = format!(
@@ -2452,11 +3210,13 @@ fn terminal_frame_reuses_visible_context_and_restores_hidden_context() {
         rows: ["stable", status]
             .into_iter()
             .enumerate()
-            .map(|(idx, plain)| RowPayload {
-                idx,
-                plain: plain.into(),
-                spans: Vec::new(),
-                links: Vec::new(),
+            .map(|(idx, plain)| {
+                Arc::new(RowPayload {
+                    idx,
+                    plain: plain.into(),
+                    spans: Vec::new(),
+                    links: Vec::new(),
+                })
             })
             .collect(),
     };
@@ -2546,12 +3306,12 @@ fn perf_spinner_stream_only_reflows_changed_rows() {
                         link_index: None,
                     })
                     .collect();
-                RowPayload {
+                Arc::new(RowPayload {
                     idx,
                     plain,
                     spans,
                     links: Vec::new(),
-                }
+                })
             })
             .collect();
         TerminalScreens {
@@ -2609,6 +3369,56 @@ fn perf_spinner_stream_only_reflows_changed_rows() {
     );
 }
 
+/// Clicking a terminal link opens it only in the focused pane, and only when the file exists.
+#[test]
+fn terminal_click_ignores_missing_files_and_focuses_other_panes_first() {
+    let press = |focused: bool, label: &str| -> Vec<Value> {
+        let (tx, rx) = mpsc::channel();
+        let mut host = Host::with_request_handler(format!("{APP}\nmount(() => TerminalPane({{sessionId: () => 1, focused: () => {focused}, multiPane: () => true}}));"),
+            "{}".into(), TextEngine::default(), move |raw| {
+                tx.send(serde_json::from_str::<Value>(&raw).unwrap()).unwrap();
+                Ok("ok".into())
+            }).unwrap();
+        install_fonts(&mut host);
+        let link = |target: &str, resolved: bool| json!({"kind": "file", "target": target, "line": null, "col": null, "resolved": resolved, "image": false});
+        let span = |text: &str, col: u16, index: usize| {
+            json!({"text": text, "col": col, "cells": text.len(), "fg": 0xffffffffu32,
+            "bold": false, "underline": true, "link": true, "linkIndex": index})
+        };
+        let screen = json!({"cols": 80, "rowsCount": 1, "cursorRow": 0, "cursorCol": 0, "cursorVisible": false, "rows": [
+            {"idx": 0, "plain": "DESIGN.md missing.md", "links": [link("DESIGN.md", true), link("missing.md", false)],
+             "spans": [span("DESIGN.md", 0, 0), span("missing.md", 10, 1)]}]});
+        host.push(json!({"view": "screens", "data": {"1": screen}}).to_string());
+        let drawn = frame(&mut host);
+        let [x, y, w, h] = drawn
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text { text, rect, .. } if text == label => Some(*rect),
+                _ => None,
+            })
+            .expect("link span drawn");
+        rx.try_iter().for_each(drop);
+        host.pointer_move(Some([x + w / 2., y + h / 2.]));
+        host.pointer_down(jsnir::editor::PointSelection::Place);
+        host.pointer_up();
+        frame(&mut host);
+        rx.try_iter().collect()
+    };
+    let opens = |requests: &[Value]| requests.iter().any(|r| r["type"] == "open");
+
+    assert!(opens(&press(true, "DESIGN.md")));
+    assert!(!opens(&press(true, "missing.md")));
+    let unfocused = press(false, "DESIGN.md");
+    assert!(!opens(&unfocused), "{unfocused:?}");
+    assert!(
+        unfocused
+            .iter()
+            .any(|r| *r == json!({"type": "selectSession", "id": 1})),
+        "{unfocused:?}"
+    );
+}
+
 /// Hovering the second of two links on one terminal row previews that link, anchored at it.
 #[test]
 fn terminal_hover_previews_the_link_under_the_pointer() {
@@ -2627,14 +3437,21 @@ fn terminal_hover_previews_the_link_under_the_pointer() {
         }
         s
     };
-    let plain = "see README.md and DESIGN.md now";
-    let screen = json!({"cols": 80, "rowsCount": 2, "cursorRow": 1, "cursorCol": 0, "cursorVisible": false, "rows": [
-        {"idx": 0, "plain": plain, "links": [link("README.md"), link("DESIGN.md")], "spans": [
+    let mut screen = json!({"cols": 80, "rowsCount": 2, "cursorRow": 1, "cursorCol": 0, "cursorVisible": false, "rows": [
+        {"idx": 0, "plain": "see README.md and DESIGN.md now", "links": [link("README.md"), link("DESIGN.md")], "spans": [
             span("see ", 0, None), span("README.md", 4, Some(0)), span(" and ", 13, None),
             span("DESIGN.md", 18, Some(1)), span(" now", 27, None)]},
         {"idx": 1, "plain": "", "links": [], "spans": []}]});
     host.push(json!({"view": "screens", "data": {"1": screen}}).to_string());
     let drawn = frame(&mut host);
+    let plain = drawn
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Text { text, rect, .. } if text.trim() == "and" => Some(*rect),
+            _ => None,
+        })
+        .expect("plain text between the two links");
     let design = drawn
         .items
         .iter()
@@ -2644,6 +3461,13 @@ fn terminal_hover_previews_the_link_under_the_pointer() {
         })
         .expect("DESIGN.md span drawn");
     rx.try_iter().for_each(drop);
+    host.pointer_move(Some([plain[0] + plain[2] / 2., plain[1] + plain[3] / 2.]));
+    host.pointer_down(jsnir::editor::PointSelection::Place);
+    host.pointer_up();
+    frame(&mut host);
+    let requests: Vec<_> = rx.try_iter().collect();
+    assert!(requests.iter().all(|r| r["type"] != "open"), "{requests:?}");
+
     host.pointer_move(Some([
         design[0] + design[2] / 2.,
         design[1] + design[3] / 2.,
@@ -2664,6 +3488,195 @@ fn terminal_hover_previews_the_link_under_the_pointer() {
         !targets.iter().any(|t| t == "README.md"),
         "previewed {targets:?}"
     );
+    host.pointer_down(jsnir::editor::PointSelection::Place);
+    host.pointer_up();
+    frame(&mut host);
+    assert!(
+        rx.try_iter()
+            .any(|r| r["type"] == "open" && r["path"] == "DESIGN.md")
+    );
+
+    host.pointer_down(jsnir::editor::PointSelection::Place);
+    screen["rows"][0]["links"][1] = link("capture.rs");
+    host.push(json!({"view": "screens", "data": {"1": screen}}).to_string());
+    frame(&mut host);
+    host.pointer_up();
+    frame(&mut host);
+    assert!(rx.try_iter().all(|r| r["type"] != "open"));
+}
+
+#[test]
+fn terminal_scroll_does_not_dispatch_a_queued_hover_as_a_link_click() {
+    use jsnir::editor::PointSelection;
+
+    let (tx, rx) = mpsc::channel();
+    let mut host = Host::with_request_handler(
+        format!(
+            "{APP}\nmount(() => TerminalPane({{sessionId: () => 1, focused: () => true, multiPane: () => false}}));"
+        ),
+        "{}".into(),
+        TextEngine::default(),
+        move |raw| {
+            tx.send(serde_json::from_str::<Value>(&raw).unwrap())
+                .unwrap();
+            Ok("ok".into())
+        },
+    )
+    .unwrap();
+    install_fonts(&mut host);
+    let screen = |path: &str, display_offset: u32| {
+        json!({"view": "terminalFrame", "data": {
+            "sequence": display_offset + 1, "contextId": 1,
+            "screens": {"1": {
+                "cols": 80, "rowsCount": 1, "cursorRow": 0, "cursorCol": 0,
+                "cursorVisible": false, "displayOffset": display_offset, "rows": [{
+                    "idx": 0, "plain": path,
+                    "links": [{"kind": "file", "target": path, "resolved": true, "image": false}],
+                    "spans": [{"text": path, "col": 0, "cells": path.len(), "fg": 0xffffffffu32,
+                               "bold": false, "underline": true, "link": true, "linkIndex": 0}]
+                }]
+            }}
+        }})
+        .to_string()
+    };
+    let link_point = |drawn: &Frame, path: &str| {
+        drawn
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text {
+                    text,
+                    rect: [x, y, w, h],
+                    ..
+                } if text == path => Some([x + w / 2., y + h / 2.]),
+                _ => None,
+            })
+            .expect("terminal link is visible")
+    };
+
+    host.push(screen("README.md", 0));
+    let point = link_point(&frame(&mut host), "README.md");
+    rx.try_iter().for_each(drop);
+
+    // Queue a scrollback update followed by a hover from the last drawn frame.
+    host.push(screen("DESIGN.md", 3));
+    host.pointer_move(Some(point));
+    let next = frame(&mut host);
+    let requests: Vec<_> = rx.try_iter().collect();
+    assert!(requests.iter().all(|r| r["type"] != "open"), "{requests:?}");
+
+    host.pointer_move(Some(link_point(&next, "DESIGN.md")));
+    host.pointer_down(PointSelection::Place);
+    host.pointer_up();
+    frame(&mut host);
+    assert!(
+        rx.try_iter()
+            .any(|r| r["type"] == "open" && r["path"] == "DESIGN.md")
+    );
+}
+
+#[test]
+fn clicking_a_tab_over_a_terminal_preview_keeps_fullscreen() {
+    use jsnir::editor::PointSelection;
+
+    let (tx, rx) = mpsc::channel();
+    let mut host = Host::with_request_handler(
+        format!("{APP}\nviewportSize.value = [640, 800];"),
+        "{}".into(),
+        TextEngine::default(),
+        move |raw| {
+            tx.send(serde_json::from_str::<Value>(&raw).unwrap())
+                .unwrap();
+            Ok("ok".into())
+        },
+    )
+    .unwrap();
+    host.set_reduced_motion(true);
+    install_fonts(&mut host);
+    let mut tiling = Workspaces::new(1, TilingMode::Niri);
+    tiling.open_pane(2, false);
+    tiling.focus_session(1);
+    tiling.toggle_maximize();
+    host.push(json!({"view": "tiling", "data": tiling.snapshot()}).to_string());
+    host.push(
+        json!({"view": "sessions", "data": {"activeId": 1, "archivedCount": 0, "items": [
+            {"id": 1, "title": "First", "cli": "codex", "cwd": "/project", "alive": true},
+            {"id": 2, "title": "Second", "cli": "codex", "cwd": "/project", "alive": true},
+        ]}})
+        .to_string(),
+    );
+    let mut rows: Vec<_> = (0..8)
+        .map(|idx| json!({"idx": idx, "plain": "", "spans": [], "links": []}))
+        .collect();
+    rows.push(json!({"idx": 8, "plain": "capture.rs", "links": [
+        {"kind": "file", "target": "capture.rs", "resolved": true, "image": false}
+    ], "spans": [
+        {"text": "capture.rs", "col": 0, "cells": 10, "fg": 0xffffffffu32, "bold": false,
+         "underline": true, "link": true, "linkIndex": 0}
+    ]}));
+    let screen = |rows| json!({"cols": 80, "rowsCount": 9, "cursorRow": 0, "cursorCol": 0, "cursorVisible": false, "rows": rows});
+    host.push(
+        json!({"view": "screens", "data": {"1": screen(rows), "2": screen(vec![
+            json!({"idx": 0, "plain": "second terminal", "spans": [], "links": []})
+        ])}})
+        .to_string(),
+    );
+    let rect_of = |frame: &Frame, label: &str| {
+        frame.items.iter().find_map(|item| match item {
+            Item::Text { text, rect, .. } if text == label => Some(*rect),
+            _ => None,
+        })
+    };
+    let drawn = frame(&mut host);
+    let [x, y, w, h] = rect_of(&drawn, "capture.rs").expect("terminal link");
+    host.pointer_move(Some([x + w / 2., y + h / 2.]));
+    frame(&mut host);
+    std::thread::sleep(Duration::from_millis(250));
+    let preview = frame(&mut host);
+    assert!(rect_of(&preview, "Loading preview…").is_some());
+    let [x, y, w, h] = rect_of(&drawn, "Second").expect("toolbar tab");
+    let tab_point = [x + w / 2., y + h / 2.];
+    assert!(
+        preview
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Fill { rect: [x, y, w, h], .. }
+        if *w == 480. && (*x..x+w).contains(&tab_point[0]) && (*y..y+h).contains(&tab_point[1]))),
+        "the preview spans the tab's hit position"
+    );
+    rx.try_iter().for_each(drop);
+    host.pointer_move(Some(tab_point));
+    host.pointer_down(PointSelection::Place);
+    host.pointer_up();
+    frame(&mut host);
+    let requests: Vec<_> = rx.try_iter().collect();
+    assert!(
+        requests
+            .iter()
+            .any(|r| *r == json!({"type": "selectSession", "id": 2})),
+        "{requests:?}"
+    );
+    assert!(requests.iter().all(|r| !matches!(
+        r["type"].as_str(),
+        Some("open" | "openDiff" | "openTile" | "closeSession")
+    )));
+
+    // Another click can retarget focus before either tab has received the next tiling snapshot.
+    let [x, y, w, h] = rect_of(&drawn, "First").expect("original toolbar tab");
+    host.pointer_move(Some([x + w / 2., y + h / 2.]));
+    host.pointer_down(PointSelection::Place);
+    host.pointer_up();
+    frame(&mut host);
+    assert!(
+        rx.try_iter()
+            .any(|r| r == json!({"type": "selectSession", "id": 1}))
+    );
+
+    tiling.focus_session(2);
+    let layout = tiling.snapshot();
+    assert!(layout.maximized);
+    host.push(json!({"view": "tiling", "data": layout}).to_string());
+    assert!(rect_of(&frame(&mut host), "second terminal").is_some());
 }
 
 /// The local preview loads live. Both the preview card and a public URL open in the tiling.
@@ -2672,7 +3685,12 @@ fn url_previews_and_terminal_links_open_in_browser_panes() {
     let (tx, rx) = mpsc::channel();
     let mut next_id = 9;
     let mut host = Host::with_request_handler(
-        format!("{APP}\nviewportSize.value = [640, 800];"),
+        format!(
+            r#"{APP}
+            viewportSize.value = [640, 800];
+            openFile("late.rs", undefined, "/project");
+        "#
+        ),
         "{}".into(),
         TextEngine::default(),
         move |raw| {
@@ -2737,8 +3755,11 @@ fn url_previews_and_terminal_links_open_in_browser_panes() {
             .collect::<Vec<_>>()
     };
 
+    let pending_document = rx
+        .try_iter()
+        .find(|r| r["type"] == "open")
+        .expect("pending file load");
     // Public URLs show a card without loading the site.
-    browser_ops(&rx);
     let public_card = hover(&mut host, rect_of(&drawn, remote).expect("remote link"));
     assert!(rect_of(&public_card, "Click to open in a browser pane").is_some());
     assert!(
@@ -2798,19 +3819,31 @@ fn url_previews_and_terminal_links_open_in_browser_panes() {
         requests[..opened].iter().any(|r| r["op"] == "hidden"),
         "the preview pauses first: {requests:?}"
     );
-    assert!(
-        requests
-            .iter()
-            .all(|r| r["type"] != "openExternal" && !(r["type"] == "open" && r["kind"] == "url"))
-    );
+    assert!(requests.iter().all(|r| !matches!(
+        r["type"].as_str(),
+        Some("openExternal" | "open" | "openDiff")
+    )));
 
     tiling.open_pane(9, false);
     push_layout(&mut host, &tiling);
+    host.push(
+        json!({"view": "viewer", "data": {
+            "intent": pending_document["intent"], "open": true, "mode": "file",
+            "cwd": "/project", "path": "/project/late.rs", "displayPath": "late.rs",
+            "lines": [], "diff": [], "additions": 0, "deletions": 0
+        }})
+        .to_string(),
+    );
     frame(&mut host);
     std::thread::sleep(Duration::from_millis(60));
     frame(&mut host);
+    let requests: Vec<_> = rx.try_iter().collect();
     assert!(
-        browser_ops(&rx)
+        requests.iter().all(|r| r["type"] != "openTile"),
+        "a late file must not open over the browser"
+    );
+    assert!(
+        requests
             .iter()
             .any(|r| r["op"] == "open" && r["id"] == 9 && r["url"] == local)
     );
@@ -2830,12 +3863,13 @@ fn url_previews_and_terminal_links_open_in_browser_panes() {
         requests.iter().filter(|r| r["type"] == "openTile").count(),
         1
     );
-    assert!(
-        requests
-            .iter()
-            .all(|r| r["type"] != "openExternal" && !(r["type"] == "open" && r["kind"] == "url"))
-    );
+    assert!(requests.iter().all(|r| !matches!(
+        r["type"].as_str(),
+        Some("openExternal" | "open" | "openDiff")
+    )));
     tiling.open_pane(10, false);
+    assert_eq!(tiling.focused_session(), 10);
+    assert!(tiling.is_maximized());
     push_layout(&mut host, &tiling);
     frame(&mut host);
     std::thread::sleep(Duration::from_millis(60));
@@ -2972,7 +4006,7 @@ fn osc8_and_wrapped_terminal_links_resolve_on_every_row() {
     let uri = format!("file:///{}", img.to_string_lossy().trim_start_matches('/'));
     vt.feed(format!("see \x1b]8;;{uri}\x07shot\x1b]8;;\x07\r\n").as_bytes());
 
-    let rows = terminal_rows_payload(&vt.snapshot().rows, &dir);
+    let rows = terminal_rows_payload(&vt.snapshot().rows, &dir, &TerminalRowCache::default());
     // Wrapped image path resolves on both row 0 and row 1.
     for (r, row) in rows[0..=1].iter().enumerate() {
         assert_eq!(row.links.len(), 1, "row {r}: {:?}", row.links);
@@ -3009,7 +4043,7 @@ fn terminal_link_offsets_count_cells_inside_a_mixed_unicode_run() {
     vt.feed("└ café https://example.com ░ fin".as_bytes());
     let screen = vt.snapshot();
     assert_eq!(screen.rows[0].runs.len(), 1);
-    let rows = terminal_rows_payload(&screen.rows, Path::new("."));
+    let rows = terminal_rows_payload(&screen.rows, Path::new("."), &TerminalRowCache::default());
     let spans: Vec<_> = rows[0]
         .spans
         .iter()
@@ -3023,6 +4057,31 @@ fn terminal_link_offsets_count_cells_inside_a_mixed_unicode_run() {
             (" ░ fin", 26, 6, None),
         ]
     );
+}
+
+#[test]
+fn terminal_row_cache_reuses_stable_lines_and_refreshes_wrapped_file_links() {
+    use icy_core::vt::{AlacrittyVt, VtEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut vt = AlacrittyVt::new(20, 6);
+    vt.feed(b"Stable header\r\nnested/file-with-long-name.rs\r\nCounting... 1");
+    let source = vt.snapshot().rows;
+    assert!(source[1].wrapped);
+    let cache = TerminalRowCache {
+        rendered: terminal_rows_payload(&source, dir.path(), &TerminalRowCache::default()),
+        source,
+    };
+    assert!(!cache.rendered[1].links[0].resolved);
+
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join("nested/file-with-long-name.rs"), "").unwrap();
+    vt.feed(b"\x08\x32");
+    let rows = terminal_rows_payload(&vt.snapshot().rows, dir.path(), &cache);
+    assert!(Arc::ptr_eq(&rows[0], &cache.rendered[0]));
+    assert!(rows[1].links[0].resolved && rows[2].links[0].resolved);
+    assert!(!Arc::ptr_eq(&rows[3], &cache.rendered[3]));
+    assert!(rows[3].plain.ends_with('2'));
 }
 
 /// Drag-selecting inside a paint-offset pane on a word-wrapped line hits the exact characters.
@@ -3161,6 +4220,20 @@ fn workspace_frame_rounds_all_four_corners_and_draws_active_tab_above_top_stroke
     assert!(
         ((tab_rect[1] + tab_rect[3] - 1.0) - frame_rect[1]).abs() < 0.01,
         "active tab bottom flare must align with the frame's top 1px stroke: tab={tab_rect:?} frame={frame_rect:?}"
+    );
+    let point = [frame_rect[0] + frame_rect[2] - 20.0, frame_rect[1] + 0.5];
+    let contains = |rect: &[f32; 4]| {
+        (rect[0]..rect[0] + rect[2]).contains(&point[0])
+            && (rect[1]..rect[1] + rect[3]).contains(&point[1])
+    };
+    assert!(
+        !drawn.items[frame_border_idx + 1..]
+            .iter()
+            .any(|item| matches!(
+                item, Item::Fill { rect, clip, top, bottom, .. }
+                    if contains(rect) && contains(clip) && top[3] == 255 && bottom[3] == 255
+            )),
+        "the header background must stop before the top border outside the active tab"
     );
 }
 
@@ -3316,4 +4389,408 @@ fn frame_budget() {
         times[times.len() * 9 / 10],
         times[times.len() - 1]
     );
+}
+
+/// Hover cost of the Metrics charts: the pointer sweeps the heatmap and the token volume bars,
+/// with the host's `metricsPointer` push per move, as the window sends it.
+/// `cargo test --release -p icy-app --bin icy perf_metrics_hover -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn perf_metrics_hover() {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    let target = Arc::new(AtomicU16::new(0));
+    let requested = Arc::clone(&target);
+    let mut host = Host::with_request_handler(
+        format!("{APP}\nconst appHandler = hostHandler; onHost((m) => {{ if (m.view === \"benchPeriod\") metricsPeriod.value = m.data; else appHandler?.(m); }});\nmount(MetricsView);"),
+        "{}".into(),
+        TextEngine::default(),
+        move |request| {
+            let request: Value = serde_json::from_str(&request).unwrap();
+            if request["type"] == "metricsPointer" {
+                requested.store(request["id"].as_u64().unwrap() as u16, Ordering::Relaxed);
+            }
+            Ok("ok".into())
+        },
+    )
+    .unwrap();
+    install_fonts(&mut host);
+    let tokens =
+        |n: u64| json!({"input": n * 1000, "output": n * 300, "cached": n * 400, "calls": n});
+    let days: Vec<_> = (0..30u64)
+        .map(|i| {
+            json!({"day": 20_000 - i, "tokens": tokens(i + 1), "sessions": 1, "durationMs": 60_000,
+                "timedTurns": 1, "hours": (0..24).map(|h| (h * 7 + i) % 11).collect::<Vec<_>>(),
+                "models": [{"name": "Claude", "provider": "anthropic", "tokens": tokens(i + 1)}]})
+        })
+        .collect();
+    host.push(
+        json!({"view": "metricsUsage", "data": {"today": 20_000, "agents": [{
+            "id": "claude", "periods": vec![json!({"current": 1, "previous": 0}); 4], "days": days}]}})
+        .to_string(),
+    );
+    let settle = |host: &mut Host| {
+        for _ in 0..200 {
+            host.poll();
+            let frame = host.frame(1280., 940., 1., 4096);
+            if !host.busy() && !frame.animating {
+                return frame;
+            }
+        }
+        host.frame(1280., 940., 1., 4096)
+    };
+    let initial = settle(&mut host);
+    let rect_of = |label: &str| {
+        initial.items.iter().find_map(|item| match item {
+            Item::Text { text, rect, .. } if text == label => Some(*rect),
+            _ => None,
+        })
+    };
+    let [_, legend_y, _, _] = rect_of("Independent scales").expect("volume chart");
+    let [sun_x, sun_y, sun_w, sun_h] = rect_of("Sun").expect("heatmap");
+    let sweeps = [
+        ("volume bars", legend_y + 60., 120., 1100.),
+        (
+            "heatmap cells",
+            sun_y + sun_h / 2.,
+            sun_x + sun_w + 8.,
+            600.,
+        ),
+    ];
+    for (name, y, from, to) in sweeps {
+        let mut steps = Vec::new();
+        for pass in 0..6 {
+            for i in 0..=120 {
+                let x = from + (to - from) * i as f32 / 120.;
+                let started = Instant::now();
+                host.pointer_move(Some([x, y]));
+                host.poll();
+                let _ = host.frame(1280., 940., 1., 4096);
+                let id = target.load(Ordering::Relaxed);
+                if let Some([left, top, width, height]) = host.screen_rect(id) {
+                    host.push(json!({"view": "metricsPointer", "data": [id, x - left, y - top, width, height]}).to_string());
+                    host.poll();
+                    let _ = host.frame(1280., 940., 1., 4096);
+                }
+                if pass > 0 {
+                    steps.push(started.elapsed().as_secs_f64() * 1000.);
+                }
+            }
+        }
+        steps.sort_by(f64::total_cmp);
+        eprintln!(
+            "metrics hover {name:<14} median {:>6.3} ms  p95 {:>6.3} ms  ({} moves)",
+            steps[steps.len() / 2],
+            steps[steps.len() * 95 / 100],
+            steps.len()
+        );
+    }
+
+    // Period switches rebuild or reuse every chart's bars.
+    let mut switches = Vec::new();
+    for i in 0..20 {
+        let started = Instant::now();
+        let period = [0, 1, 2][i % 3];
+        host.push(json!({"view": "benchPeriod", "data": period}).to_string());
+        host.poll();
+        let _ = host.frame(1280., 940., 1., 4096);
+        switches.push(started.elapsed().as_secs_f64() * 1000.);
+        settle(&mut host);
+    }
+    switches.sort_by(f64::total_cmp);
+    eprintln!(
+        "metrics period switch      median {:>6.3} ms  max {:>6.3} ms",
+        switches[switches.len() / 2],
+        switches[switches.len() - 1]
+    );
+}
+
+#[test]
+fn sidebar_browser_address_field_types_and_submits_in_the_full_app() {
+    let (tx, rx) = mpsc::channel();
+    let script = format!("{APP}\nviewportSize.value = [1200, 800];");
+    let mut host =
+        Host::with_request_handler(script, "{}".into(), TextEngine::default(), move |raw| {
+            let request: Value = serde_json::from_str(&raw).unwrap();
+            let reply = match request["type"].as_str() {
+                Some("openTile") => "9".to_string(),
+                Some("browserAddress") => {
+                    json!({"url": format!("https://{}", request["text"].as_str().unwrap())})
+                        .to_string()
+                }
+                _ => "ok".to_string(),
+            };
+            tx.send(request).unwrap();
+            Ok(reply)
+        })
+        .unwrap();
+    install_fonts(&mut host);
+    let initial = frame(&mut host);
+    let rect = initial
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Text { text, rect, .. } if text == "Browser" => Some(*rect),
+            _ => None,
+        })
+        .expect("sidebar browser action");
+    host.pointer_move(Some([rect[0] + rect[2] / 2., rect[1] + rect[3] / 2.]));
+    host.pointer_down(jsnir::editor::PointSelection::Place);
+    host.pointer_up();
+    frame(&mut host);
+    let mut tiles = Workspaces::new(1, TilingMode::Niri);
+    tiles.open_pane(9, false);
+    host.push(json!({"view": "tiling", "data": tiles.snapshot()}).to_string());
+    frame(&mut host);
+    std::thread::sleep(Duration::from_millis(700));
+    frame(&mut host);
+    host.push(
+        json!({"view": "browserState", "data": {"id": 9, "url": "about:blank", "title": "",
+        "loading": false, "canBack": false, "canForward": false}})
+        .to_string(),
+    );
+    host.push(json!({"view": "tiling", "data": tiles.snapshot()}).to_string());
+    frame(&mut host);
+    assert!(
+        host.focused(),
+        "the blank browser focuses its address field"
+    );
+    let _ = rx.try_iter().count();
+    host.edit(&[jsnir::editor::EditorEvent::Insert("example.com".into())]);
+    host.push(json!({"view": "tiling", "data": tiles.snapshot()}).to_string());
+    frame(&mut host);
+    host.edit(&[jsnir::editor::EditorEvent::Enter]);
+    frame(&mut host);
+    let requests: Vec<Value> = rx.try_iter().filter(|r| r["type"] == "browser").collect();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r["op"] == "navigate" && r["text"] == "example.com"),
+        "{requests:?}"
+    );
+}
+
+#[test]
+fn source_editor_context_menu_runs_edits_and_selection_follows_the_accent() {
+    let script = format!(
+        r#"{APP}
+        const spec = {{ kind: 'file', path: 'test.txt', cwd: '/project' }};
+        const fixture = {{ path: '/project/test.txt', displayPath: 'test.txt', editableText: 'one\ntwo\n',
+          lines: ['one', 'two'].map((text, i) => ({{ num: i + 1, text }})) }};
+        activeNav.value = 'agents';
+        tileSpecs.value = {{ 900: spec }};
+        tilingState.value = {{ ...tilingState.value, focusedSession: 900 }};
+        mount(() => SourceEditor({{ spec, doc: () => fixture }}));
+        onHost((message) => {{
+          if (message.view === 'editorKey') receiveEditorKey(message.data);
+          if (message.view === 'accent') themeAccent.value = message.data;
+        }});
+        "#
+    );
+    let (tx, rx) = mpsc::channel();
+    let mut host =
+        Host::with_request_handler(script, "{}".into(), TextEngine::default(), move |raw| {
+            tx.send(serde_json::from_str::<Value>(&raw).unwrap())
+                .unwrap();
+            Ok("ok".into())
+        })
+        .unwrap();
+    install_fonts(&mut host);
+    frame(&mut host);
+    host.push(json!({"view": "editorKey", "data": {"command": "selectAll"}}).to_string());
+    let selection_colors = |host: &mut Host| {
+        frame(host)
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Fill { rect, top, .. } if rect[0] > 40. && rect[3] < 30. => Some(*top),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let blue = selection_colors(&mut host);
+    host.push(json!({"view": "accent", "data": "neutral"}).to_string());
+    let neutral = selection_colors(&mut host);
+    assert!(
+        !blue.is_empty() && blue.len() == neutral.len(),
+        "{blue:?} {neutral:?}"
+    );
+    assert_ne!(blue, neutral, "the selection fill follows the accent");
+
+    // Right-click opens the menu at the pointer: Add to Chat (there is a selection) and the edits.
+    host.pointer_move(Some([120., 20.]));
+    host.context_press();
+    let menu = frame(&mut host);
+    let label = |frame: &Frame, label: &str| {
+        frame.items.iter().find_map(|item| match item {
+            Item::Text { text, rect, .. } if text == label => Some(*rect),
+            _ => None,
+        })
+    };
+    for item in ["Add to Chat", "Cut", "Copy", "Paste", "Select All"] {
+        assert!(label(&menu, item).is_some(), "missing {item}");
+    }
+    let copy = label(&menu, "Copy").unwrap();
+    let _ = rx.try_iter().count();
+    host.pointer_move(Some([copy[0] + 2., copy[1] + copy[3] / 2.]));
+    host.pointer_down(jsnir::editor::PointSelection::Place);
+    host.pointer_up();
+    let closed = frame(&mut host);
+    assert!(
+        rx.try_iter()
+            .any(|v| v == json!({"type": "editorCommand", "command": "copy"}))
+    );
+    assert!(
+        label(&closed, "Paste").is_none(),
+        "the menu closes after an edit"
+    );
+}
+
+fn two_workspace_host(extra: &str) -> (Host, mpsc::Receiver<Value>) {
+    // Workspace 0: pane 1 (an agent in /alpha); workspace 1: pane 2 (a shell in /beta).
+    let mut tiling = Workspaces::new(1, TilingMode::Niri);
+    tiling.open_pane(2, false);
+    assert!(tiling.move_to_workspace(2, 1, false));
+    tiling.focus_workspace(0);
+    let (tx, rx) = mpsc::channel();
+    let mut host = Host::with_request_handler(
+        format!("{APP}\n{extra}"),
+        "{}".into(),
+        TextEngine::default(),
+        move |raw| {
+            tx.send(serde_json::from_str::<Value>(&raw).unwrap())
+                .unwrap();
+            Ok("ok".into())
+        },
+    )
+    .unwrap();
+    install_fonts(&mut host);
+    for (view, data) in [
+        ("viewport", json!([640, 800])),
+        ("tiling", json!(tiling.snapshot())),
+        (
+            "sessions",
+            json!({"activeId": 1, "archivedCount": 0, "items": [
+                {"id": 1, "title": "Pane 1", "cli": "codex", "cwd": "/alpha", "alive": true, "status": "working"},
+                {"id": 2, "title": "Pane 2", "cli": "terminal", "cwd": "/beta", "alive": true, "status": "idle"}]}),
+        ),
+    ] {
+        host.push(json!({"view": view, "data": data}).to_string());
+    }
+    frame(&mut host);
+    (host, rx)
+}
+
+fn text_top(frame: &Frame, name: &str) -> Option<f32> {
+    frame.items.iter().find_map(|item| match item {
+        Item::Text { text, rect, .. } if text == name => Some(rect[1]),
+        _ => None,
+    })
+}
+
+/// Tops of `name` in `after` that `before` did not draw (the sidebar may show the same folder).
+fn new_text_tops(before: &Frame, after: &Frame, name: &str) -> Vec<f32> {
+    let tops = |frame: &Frame| {
+        frame
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Text { text, rect, .. } if text == name => Some(rect[1]),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let old = tops(before);
+    tops(after)
+        .into_iter()
+        .filter(|top| !old.iter().any(|o| (o - top).abs() < 0.5))
+        .collect()
+}
+
+#[test]
+fn workspace_switcher_keeps_the_selection_centred_and_opens_the_picked_workspace() {
+    let (mut host, rx) = two_workspace_host("");
+    let mut key = |action: &str| {
+        host.push(json!({"view": "modalKey", "data": action}).to_string());
+        frame(&mut host)
+    };
+    let closed = key("noop");
+    let opened = key("workspace.switcher");
+    // The modal blurs the workspace under it (JSNIR `paint.backdropBlur`).
+    assert!(
+        opened
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Backdrop { blur, .. } if *blur > 0.))
+    );
+    let first = new_text_tops(&closed, &opened, "alpha");
+    let second = new_text_tops(&closed, &opened, "beta");
+    assert_eq!(
+        (first.len(), !second.is_empty()),
+        (1, true),
+        "{first:?} {second:?}"
+    );
+    assert!(second[0] > first[0], "{first:?} {second:?}");
+
+    // The wheel slides the list: the newly selected row takes the centre the first one had.
+    let moved = key("down");
+    let centred = new_text_tops(&closed, &moved, "beta");
+    assert!(
+        centred.iter().any(|top| (top - first[0]).abs() < 1.),
+        "{first:?} {centred:?}"
+    );
+
+    key("enter");
+    let requests: Vec<_> = rx.try_iter().collect();
+    assert!(requests.contains(&json!({"type": "focusWorkspace", "index": 1})));
+    assert!(requests.contains(&json!({"type": "paletteKeys", "on": false})));
+}
+
+#[test]
+fn overview_filter_moves_the_selection_and_alt_digits_open_a_workspace() {
+    let (mut host, rx) = two_workspace_host(
+        r#"const appHandler = hostHandler;
+        onHost(message => {
+          if (message.view === "testFilter") setOverviewFilter(message.data);
+          else appHandler?.(message);
+        });"#,
+    );
+    let mut send = |view: &str, data: Value| {
+        host.push(json!({"view": view, "data": data}).to_string());
+        frame(&mut host)
+    };
+    send("modalKey", json!("view.overview"));
+    // The shell is idle: the filter takes the selection to the working agent.
+    send("modalKey", json!("down"));
+    send("testFilter", json!("@work"));
+    send("modalKey", json!("enter"));
+    let requests: Vec<_> = rx.try_iter().collect();
+    assert!(
+        requests.contains(&json!({"type": "selectSession", "id": 1})),
+        "{requests:?}"
+    );
+
+    // Nothing matches: the empty state shows, Enter picks nothing and Esc only clears the filter.
+    send("modalKey", json!("view.overview"));
+    let empty = send("testFilter", json!("nothing-here"));
+    assert!(text_top(&empty, "No windows match").is_some());
+    send("modalKey", json!("enter"));
+    send("modalKey", json!("escape"));
+    let requests: Vec<_> = rx.try_iter().collect();
+    assert!(
+        !requests.iter().any(|r| r["type"] == "selectSession"),
+        "{requests:?}"
+    );
+    assert!(
+        !requests.contains(&json!({"type": "overview", "on": false})),
+        "{requests:?}"
+    );
+
+    let labelled = send("modalKey", json!("workspace:2"));
+    let requests: Vec<_> = rx.try_iter().collect();
+    assert!(
+        requests.contains(&json!({"type": "focusWorkspace", "index": 1})),
+        "{requests:?}"
+    );
+    assert!(requests.contains(&json!({"type": "overview", "on": false})));
+    assert!(text_top(&labelled, "No windows match").is_none());
 }

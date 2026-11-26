@@ -96,50 +96,6 @@ fn rasterize_tab_shape(source: &str, svg: &str, scale: f32) -> Option<Picture> {
     Some((source.into(), rgba, [w, h]))
 }
 
-/// Icy's "cold front": a neutral halftone mask, tinted at draw time. A curved band and a
-/// finer echo frame a quiet centre; the size and opacity of each dot follow the same field.
-fn workspace_halftone() -> Picture {
-    const W: usize = 1080;
-    const H: usize = 720;
-    const PITCH: usize = 7;
-    const KERNEL: usize = PITCH / 2;
-    let bell = |v: f32| (-v * v).exp();
-    let smooth = |v: f32| {
-        let v = v.clamp(0., 1.);
-        v * v * (3. - 2. * v)
-    };
-    let mut rgba = vec![255; W * H * 4];
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel[3] = 0;
-    }
-    for cy in (KERNEL..H - KERNEL).step_by(PITCH) {
-        for cx in (KERNEL..W - KERNEL).step_by(PITCH) {
-            let (x, y) = (cx as f32 / W as f32, cy as f32 / H as f32);
-            let front = 1.08 - 0.76 * x + 0.10 * x * x + 0.07 * (x * 5.0).sin();
-            let sweep = smooth((x - 0.20) / 0.74);
-            let band = sweep * bell((y - front) / 0.13);
-            let echo = sweep * bell((y - front - 0.20) / 0.055);
-            let corner = bell((x - 0.97) / 0.40) * bell((y - 0.88) / 0.40);
-            let frost = bell((x - 0.11) / 0.27) * bell((y - 0.04) / 0.25);
-            let distance = ((x - 0.50) / 0.48).powi(2) + ((y - 0.45) / 0.46).powi(2);
-            let quiet = 0.20 + 0.80 * smooth((distance - 0.05) / 0.85);
-            let light =
-                (0.04 + quiet * (0.59 * band + 0.30 * echo + 0.65 * corner + 0.23 * frost)).min(1.);
-            let radius = 0.78 + 2.35 * light;
-            let opacity = 30. + 207. * light.powf(0.85);
-            for py in cy - KERNEL..=cy + KERNEL {
-                for px in cx - KERNEL..=cx + KERNEL {
-                    let dx = px.abs_diff(cx) as f32;
-                    let dy = py.abs_diff(cy) as f32;
-                    let coverage = (radius + 0.5 - dx.hypot(dy)).clamp(0., 1.);
-                    rgba[(py * W + px) * 4 + 3] = (coverage * opacity).round() as u8;
-                }
-            }
-        }
-    }
-    ("workspace:halftone".into(), rgba, [W as u32, H as u32])
-}
-
 /// Crisp Lucide/Accordee outline icons (24x24 viewBox, tinted in TSX via `paint.color`).
 const UI_GLYPHS: &[(&str, &str, u32)] = &[
     (
@@ -416,6 +372,21 @@ const UI_GLYPHS: &[(&str, &str, u32)] = &[
     (
         "copy",
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>"#,
+        16,
+    ),
+    (
+        "scissors",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/></svg>"#,
+        16,
+    ),
+    (
+        "clipboard",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>"#,
+        16,
+    ),
+    (
+        "select-all",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3a2 2 0 0 0-2 2"/><path d="M19 3a2 2 0 0 1 2 2"/><path d="M21 19a2 2 0 0 1-2 2"/><path d="M5 21a2 2 0 0 1-2-2"/><path d="M9 3h1"/><path d="M9 21h1"/><path d="M14 3h1"/><path d="M14 21h1"/><path d="M3 9v1"/><path d="M21 9v1"/><path d="M3 14v1"/><path d="M21 14v1"/></svg>"#,
         16,
     ),
     (
@@ -704,6 +675,11 @@ const SPINNER_FRAMES: u32 = 12;
 
 pub fn load_static(scale: f32) -> Vec<Picture> {
     let mut out = Vec::with_capacity(UI_GLYPHS.len() + COLOR_MARKS.len() + 10);
+    let samples = 32;
+    let fade: Vec<_> = (0..samples)
+        .flat_map(|x| [255, 255, 255, (x * 255 / (samples - 1)) as u8])
+        .collect();
+    out.push(("ui:text-fade".into(), fade, [samples, 1]));
     for &(name, svg, logical) in UI_GLYPHS {
         if let Some((rgba, size)) = rasterize_svg(svg, logical, scale, true) {
             out.push((format!("glyph:{name}"), rgba, size));
@@ -732,7 +708,6 @@ pub fn load_static(scale: f32) -> Vec<Picture> {
             }
         }
     }
-    out.push(workspace_halftone());
     // Usage badge rings (Antigravity/Conductor-style corner ring): a full track and 21 arcs.
     let ring = |body: String| {
         format!(

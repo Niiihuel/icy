@@ -135,15 +135,16 @@ function previewContext(path: string, lines: ViewerLine[], start: TextPoint, end
   return editorContext(path, start[0] + 1, lastLine(start, end) + 1, previewText(lines, start, end));
 }
 
-// The selected [from, to) columns on one 1-based line, or null when the line is outside it.
-function lineSelection(lines: ViewerLine[], start: TextPoint, end: TextPoint, num: number): [number, number] | null {
+// The selected columns on one 1-based line, or null when the line is outside it. A selection over
+// several lines has square fills, so its lines join into one block like VS Code's.
+function lineSelection(lines: ViewerLine[], start: TextPoint, end: TextPoint, num: number): LineSelection | null {
   const index = num - 1;
   if (index < start[0] || index > end[0]) return null;
+  const radius = start[0] === end[0] ? editorLayout.selectionRadius : 0;
   const from = index === start[0] ? start[1] : 0;
-  const to = index === end[0] ? end[1] : lines[index]?.text.length ?? 0;
-  if (from !== to) return [from, to];
-  // An empty line inside the selection still shows a sliver so the break reads as selected.
-  return index > start[0] && index < end[0] ? [0, 1] : null;
+  // A line the selection continues past also takes its line break: one cell after the text, as VS Code.
+  const to = index === end[0] ? end[1] : (lines[index]?.text.length ?? 0) + 1;
+  return from !== to ? [from, to, radius] : null;
 }
 
 // Caret position of a text field from JSNIR's Unicode-scalar selection offsets.
@@ -179,43 +180,29 @@ function addFocusedSelectionToChat(): void {
   if (spec?.kind === "file") editorChats.get(docKey(spec))?.();
 }
 
-function EditorContextMenu(props: { cwd: string; open: Signal<boolean>; captured: Signal<string>; context: () => string }): Element {
+// Which CLI gets the context when several could: anchored to the editor body, since the chip
+// is gone once the menu opens from the keyboard.
+function SessionMenu(props: { cwd: string; open: Signal<boolean>; captured: Signal<string>; anchor: () => number | undefined }): Element {
   const { open, captured } = props;
-  let anchor: number | undefined;
   const sessions = () => cliSessions(props.cwd);
   return (
-    <Box ref={(id) => { anchor = id; }} style={{ shrink: 0 }}>
-      <SecondaryButton label="Send to CLI…" height={editorLayout.toolbarHeight} onPress={() => {
-        if (!open.value) captured.value = props.context();
-        open.value = !open.value;
+    <MenuPanel open={open} anchor={props.anchor} align="end" width={spacing.menuWidth}>
+      <MenuLabel label="Paste context without submitting" />
+      <MenuItem label="Copy context" icon="copy" onPress={() => {
+        copyText(captured.value);
+        open.value = false;
       }} />
-      <MenuPanel open={open} anchor={() => anchor} align="end" width={spacing.menuWidth}>
-        <MenuLabel label={() => captured.value ? "Paste context without submitting" : "Select some code first"} />
-        <Show when={() => !!captured.value}>
-          {() => (
-            <Column style={{ gap: spacing.unit }}>
-              <MenuItem label="Copy context" icon="copy" onPress={() => {
-                copyText(captured.value);
-                open.value = false;
-              }} />
-              <MenuSeparator />
-              <Show when={() => sessions().length === 0}>
-                {() => <MenuLabel label="No running CLI in this project" />}
-              </Show>
-              <Column style={{ maxHeight: editorLayout.sessionListHeight, scroll: true }}>
-                <For each={sessions} key={(s) => s.id}>
-                  {(item) => <MenuItem label={() => cleanTitle(item().title) || cliDisplayName(item().cli)}
-                    description={() => `${cliDisplayName(item().cli)} · #${item().id}`}
-                    image={() => `cli:${item().cli}`} onPress={() => {
-                      if (pasteContext(item(), props.cwd, captured.value)) open.value = false;
-                    }} />}
-                </For>
-              </Column>
-            </Column>
-          )}
-        </Show>
-      </MenuPanel>
-    </Box>
+      <MenuSeparator />
+      <Column style={{ maxHeight: editorLayout.sessionListHeight, scroll: true }}>
+        <For each={sessions} key={(s) => s.id}>
+          {(item) => <MenuItem label={() => cleanTitle(item().title) || cliDisplayName(item().cli)}
+            description={() => `${cliDisplayName(item().cli)} · #${item().id}`}
+            image={() => `cli:${item().cli}`} onPress={() => {
+              if (pasteContext(item(), props.cwd, captured.value)) open.value = false;
+            }} />}
+        </For>
+      </Column>
+    </MenuPanel>
   );
 }
 
@@ -243,16 +230,141 @@ function AddToChatChip(props: { onPress: () => void }): Element {
   );
 }
 
+// Right-click menu of the source editor, in the house menu style the Add to Chat chip shares:
+// app background, hairline border and each action's key chips. Edits run as their keys would.
+function EditorMenu(props: { open: Signal<boolean>; anchor: () => number | undefined; selected: () => boolean; onAddToChat: () => void }): Element {
+  const run = (command: string) => () => {
+    props.open.value = false;
+    requestHost({ type: "editorCommand", command });
+  };
+  return (
+    <MenuPanel open={props.open} anchor={props.anchor} width={spacing.menuWidth}>
+      <Show when={props.selected}>
+        {() => (
+          <Column style={{ gap: 1 }}>
+            <MenuItem icon="message-square-plus" label="Add to Chat" keys={() => keysFor("editor.addToChat")} onPress={() => {
+              props.open.value = false;
+              props.onAddToChat();
+            }} />
+            <MenuSeparator />
+          </Column>
+        )}
+      </Show>
+      <MenuItem icon="scissors" label="Cut" keys={chordParts("Ctrl+X")} onPress={run("cut")} />
+      <MenuItem icon="copy" label="Copy" keys={chordParts("Ctrl+C")} onPress={run("copy")} />
+      <MenuItem icon="clipboard" label="Paste" keys={chordParts("Ctrl+V")} onPress={run("paste")} />
+      <MenuSeparator />
+      <MenuItem icon="select-all" label="Select All" keys={chordParts("Ctrl+A")} onPress={run("selectAll")} />
+    </MenuPanel>
+  );
+}
+
+// shortcut: JSNIR's create-input command takes an initial selection but `TextInput` has no prop
+// for it, so this mirrors sdk.ts `TextInputElement.mount` with one. Use `TextInput` once it has it.
+class CodeInputElement extends TextInputElement {
+  selection: [number, number];
+  constructor(props: TextInputProps, selection: [number, number]) {
+    super(props);
+    this.selection = selection;
+  }
+  mount(parent: number | undefined, before: number | undefined, created: number[] | null): number {
+    const props = this.props;
+    const id = newId();
+    const field: Field = {
+      text: () => jsnir.readText(id) ?? "",
+      selection: () => [jsnir.columns.selectionStart[id], jsnir.columns.selectionEnd[id]],
+      rect: () => [jsnir.columns.x[id], jsnir.columns.y[id], jsnir.columns.width[id], jsnir.columns.height[id]],
+      replace: (text: string, expected?: string) => emitSetField(id, text, expected ?? (jsnir.readText(id) ?? "")),
+    };
+    const change = props.onChange !== undefined ? register(props.onChange) : 0;
+    const paint = props.paint === undefined ? undefined : bindId(props.paint, id, emitSetPaint);
+    emitCreateInput(id, parent, before, props.value, this.selection, 0, change, props.placeholder,
+      props.placeholderColor, props.multiline, props.submitOnEnter, props.retainOnSubmit, props.purpose,
+      props.style, props.font, paint);
+    if (created !== null) created.push(id);
+    if (props.autoFocus) emitFocus(id);
+    if (props.ref !== undefined) props.ref(field);
+    return id;
+  }
+}
+
+function CodeInput(props: TextInputProps & { selection: [number, number] }): Element {
+  return new CodeInputElement(props, props.selection);
+}
+
+// A key on a file's read view (`window.rs` `editor_preview_key`), or Escape from its editor.
+interface EditorKey {
+  insert?: string;
+  // true: Backspace, false: Delete.
+  delete?: boolean;
+  command?: "selectAll" | "copy" | "cut" | "escape";
+}
+
+const editorKeys = new Map<string, (key: EditorKey) => void>();
+// Per document: true while its editor is open. The read view of the focused file takes the keys.
+const editorModes = signal<Record<string, boolean>>({});
+let editorPreviewOn = false;
+effect(() => {
+  const spec = focusedTile();
+  const on = activeNav.value === "agents" && !overviewOpen2.value && spec?.kind === "file"
+    && editorModes.value[docKey(spec)] === false;
+  if (on !== editorPreviewOn && requestHost({ type: "editorPreview", on })) editorPreviewOn = on;
+});
+
+function receiveEditorKey(key: EditorKey): void {
+  const spec = focusedTile();
+  if (spec?.kind === "file") editorKeys.get(docKey(spec))?.(key);
+}
+
+// Character offset of a [line, UTF-16 column] point in `text` (JSNIR fields count characters).
+function charOffset(text: string, [line, col]: TextPoint): number {
+  const lines = text.split("\n");
+  const row = Math.min(line, lines.length - 1);
+  const before = lines.slice(0, row).join("\n") + (row > 0 ? "\n" : "");
+  return Array.from(before + lines[row].slice(0, col)).length;
+}
+
+// `text` with the [from, to) characters replaced the way a key edits them, and the caret after it.
+function applyEditorKey(text: string, [from, to]: [number, number], key: EditorKey): { text: string; caret: number } {
+  const chars = Array.from(text);
+  if (key.insert !== undefined) {
+    chars.splice(from, to - from, ...Array.from(key.insert));
+    return { text: chars.join(""), caret: from + Array.from(key.insert).length };
+  }
+  if (key.delete === undefined) return { text, caret: to };
+  if (from !== to) {
+    chars.splice(from, to - from);
+    return { text: chars.join(""), caret: from };
+  }
+  if (key.delete && from > 0) {
+    chars.splice(from - 1, 1);
+    return { text: chars.join(""), caret: from - 1 };
+  }
+  if (!key.delete && from < chars.length) chars.splice(from, 1);
+  return { text: chars.join(""), caret: from };
+}
+
+// VS Code-like: the file reads with highlighting and line numbers; select with the pointer or
+// Ctrl+A, copy with Ctrl+C, and typing, pasting or a double click edits in place. Esc returns a
+// clean editor to the read view; Ctrl+S saves. A selection offers "Add to Chat".
 function SourceEditor(props: { spec: TileSpec; doc: () => ViewerView; paintOffset?: () => [number, number] }): Element {
   const key = docKey(props.spec);
   const draft = signal<EditorDraft | undefined>(editorDrafts.get(key));
   const editing = signal(draft.value !== undefined);
   const sel = signal<{ anchor: TextPoint; head: TextPoint } | null>(null);
+  // Where the last press landed on the read view: the caret when editing starts.
+  let point: TextPoint = [0, 0];
+  let pressedAt = 0;
+  // The editor field's selection when it opens, in characters.
+  let openSelection: [number, number] = [0, 0];
   const chipAt = signal<RowPoint | null>(null);
   const caret = signal<Caret>({ line: 0, col: 0, selected: 0 });
   const menuOpen = signal(false);
   const menuText = signal("");
   const fieldBox = signal<[number, number]>([0, 0]);
+  const contextOpen = signal(false);
+  const contextAt = signal<[number, number]>([0, 0]);
+  let contextAnchor: number | undefined;
   let bodyId: number | undefined;
   const confirmingDiscard = signal(false);
   let field: Field | undefined;
@@ -266,6 +378,21 @@ function SourceEditor(props: { spec: TileSpec; doc: () => ViewerView; paintOffse
       blameCache.delete(doc.path);
     }
     lastLines = doc.lines;
+  });
+  effect(() => {
+    const on = editing.value;
+    editorModes.update((modes) => ({ ...modes, [key]: on }));
+  });
+  onCleanup(() => editorModes.update((modes) => {
+    const { [key]: _, ...rest } = modes;
+    return rest;
+  }));
+  // A clean editor closes when its window loses focus.
+  effect(() => {
+    const spec = focusedTile();
+    if (editing.value && (!spec || docKey(spec) !== key) && !draft.value?.dirty.value && !draft.value?.pending.value) {
+      editing.value = false;
+    }
   });
 
   // Blame for the caret line, requested once the caret rests and the draft is saved.
@@ -308,16 +435,33 @@ function SourceEditor(props: { spec: TileSpec; doc: () => ViewerView; paintOffse
     tick();
   };
 
-  const edit = () => {
+  const ordered = (): [TextPoint, TextPoint] => {
+    const s = sel.value;
+    return s ? orderPoints(s.anchor, s.head) : [point, point];
+  };
+  // Opens the editor at the read view's caret or selection, applying the key that opened it.
+  const edit = (editKey?: EditorKey) => {
     const doc = props.doc();
-    if (!draft.value?.dirty.value && !draft.value?.pending.value) {
-      if (doc.editableText === undefined) return;
+    let d = draft.value;
+    if (!d?.dirty.value && !d?.pending.value) {
+      if (doc.editableText === undefined) {
+        if (doc.editUnavailable) noticeState.value = { kind: "info", text: doc.editUnavailable };
+        return;
+      }
       const text = editorText(doc.editableText);
-      draft.value = {
+      d = {
         spec: props.spec, path: doc.path, original: doc.editableText, text, baseline: text,
         dirty: signal(false), pending: signal(false), status: signal(""),
       };
+      draft.value = d;
     }
+    const [start, end] = ordered();
+    const range: [number, number] = [charOffset(d.text, start), charOffset(d.text, end)];
+    const next = editKey ? applyEditorKey(d.text, range, editKey) : { text: d.text, caret: range[1] };
+    if (next.text !== d.text) updateEditorDraft(d, next.text);
+    openSelection = editKey ? [next.caret, next.caret] : range;
+    sel.value = null;
+    chipAt.value = null;
     editing.value = true;
   };
   const context = () => {
@@ -348,57 +492,77 @@ function SourceEditor(props: { spec: TileSpec; doc: () => ViewerView; paintOffse
   editorChats.set(key, addToChat);
   onCleanup(() => { if (editorChats.get(key) === addToChat) editorChats.delete(key); });
 
-  const label = () => {
-    const d = draft.value;
-    if (editing.value) return d?.status.value || (d?.dirty.value ? "Unsaved changes" : "Editing");
-    if (d?.dirty.value) return "Unsaved draft";
-    const s = sel.value;
-    if (s && caret.value.selected > 0) {
-      const [start, end] = orderPoints(s.anchor, s.head);
-      return `Lines ${start[0] + 1}–${lastLine(start, end) + 1}`;
+  const selectedText = () => {
+    const [start, end] = ordered();
+    return previewText(props.doc().lines, start, end);
+  };
+  const onKey = (k: EditorKey) => {
+    if (editing.value) {
+      if (k.command === "escape" && !draft.value?.dirty.value && !draft.value?.pending.value) editing.value = false;
+      return;
     }
-    return props.doc().editUnavailable ?? "Drag to select";
+    const lines = props.doc().lines;
+    switch (k.command) {
+      case "selectAll": {
+        if (!lines.length) return;
+        const last = lines.length - 1;
+        sel.value = { anchor: [0, 0], head: [last, lines[last].text.length] };
+        chipAt.value = null;
+        caret.value = { line: last + 1, col: lines[last].text.length + 1, selected: Array.from(selectedText()).length };
+        return;
+      }
+      case "copy":
+      case "cut": {
+        // No selection: the caret's whole line, as VS Code copies it.
+        const text = sel.value ? selectedText() : `${lines[point[0]]?.text ?? ""}\n`;
+        copyText(text);
+        if (k.command === "cut" && sel.value) edit({ insert: "" });
+        return;
+      }
+      case "escape":
+        sel.value = null;
+        chipAt.value = null;
+        return;
+    }
+    edit(k);
+  };
+  editorKeys.set(key, onKey);
+  onCleanup(() => { if (editorKeys.get(key) === onKey) editorKeys.delete(key); });
+
+  const status = () => {
+    const d = draft.value;
+    if (editing.value) return d?.status.value || (d?.dirty.value ? "Unsaved changes" : "");
+    return props.doc().editUnavailable ?? "";
   };
   return (
     <Column style={{ grow: 1, minHeight: 0, minWidth: 0 }}>
-      <Row style={{ minHeight: editorLayout.toolbarHeight, padding: [spacing.unit, spacing.unit * 2, spacing.unit, spacing.unit * 2], gap: spacing.unit, align: "center", shrink: 0 }}
-        paint={() => ({ edge: palette().border, edgeWidth: spacing.hairline, edgeSides: [0, 0, 1, 0] })}>
-        <Text lines={2} style={{ grow: 1, minWidth: 0 }} font={{ family: fontFamilies.sans, size: typeScale.caption }}
-          paint={() => ({ color: palette().textMuted })}>{label}</Text>
-        <Show when={() => !editing.value && (props.doc().editableText !== undefined || !!draft.value?.dirty.value || !!draft.value?.pending.value)}>
-          {() => <SecondaryButton height={editorLayout.toolbarHeight} label={() => draft.value?.dirty.value ? "Resume edit" : "Edit"} onPress={edit} />}
-        </Show>
-        <Show when={() => editing.value}>
-          {() => <Row style={{ gap: spacing.unit, shrink: 0 }}>
-            <Show when={() => !!draft.value?.dirty.value && !draft.value?.pending.value}>
-              {() => <IconButton icon="trash" label={() => confirmingDiscard.value ? "Confirm discard" : "Discard draft"} size="sm"
-                highlighted={confirmingDiscard} onPress={() => {
-                  const d = draft.value;
-                  if (!d) return;
-                  if (!confirmingDiscard.value) { confirmingDiscard.value = true; return; }
-                  editorDrafts.delete(key);
-                  draft.value = undefined;
-                  confirmingDiscard.value = false;
-                  editing.value = false;
-                }} />}
-            </Show>
-            <SecondaryButton height={editorLayout.toolbarHeight} label="Preview" onPress={() => {
-              confirmingDiscard.value = false;
-              editing.value = false;
-            }} />
-            <IconButton icon="check" size="sm" label="Save file" disabled={() => !draft.value?.dirty.value || !!draft.value?.pending.value}
-              onPress={() => saveEditorDraft(draft.value)} />
-          </Row>}
-        </Show>
-        <EditorContextMenu cwd={props.spec.cwd ?? workspacePath.value} open={menuOpen} captured={menuText} context={context} />
-      </Row>
-      <Column ref={(id) => { bodyId = id; }} style={{ grow: 1, minHeight: 0, minWidth: 0 }}>
+      <Column ref={(id) => { bodyId = id; }} style={{ grow: 1, minHeight: 0, minWidth: 0 }}
+        onContextMenu={({ x, y }) => {
+          // The pointer is in window space; the anchor sits in the body column.
+          const ox = bodyId === undefined ? 0 : jsnir.columns.x[bodyId] ?? 0;
+          const oy = bodyId === undefined ? 0 : jsnir.columns.y[bodyId] ?? 0;
+          contextAt.value = [x - ox, y - oy];
+          contextOpen.value = true;
+        }}>
         <Dynamic value={editing} style={{ grow: 1, minHeight: 0, minWidth: 0 }}>
           {(on) => {
             if (!on) return <SourceLines doc={props.doc} paintOffset={props.paintOffset}
               select={(anchor, head, phase, at) => {
+                if (phase === "start") {
+                  // A second press on the same line soon after the first edits there.
+                  const now = Date.now();
+                  const again = now - pressedAt < editorLayout.doubleClickMs && point[0] === anchor[0];
+                  pressedAt = again ? 0 : now;
+                  point = anchor;
+                  if (again) {
+                    sel.value = null;
+                    edit();
+                    return;
+                  }
+                }
                 const [start, end] = orderPoints(anchor, head);
                 const empty = start[0] === end[0] && start[1] === end[1];
+                point = head;
                 sel.value = empty ? null : { anchor, head };
                 chipAt.value = phase === "end" && !empty ? at : null;
                 caret.value = {
@@ -429,7 +593,7 @@ function SourceEditor(props: { spec: TileSpec; doc: () => ViewerView; paintOffse
               )} />;
             const d = draft.value!;
             onCleanup(() => { field = undefined; });
-            return <TextInput multiline autoFocus value={d.text} font={CODE_FONT}
+            return <CodeInput multiline autoFocus value={d.text} selection={openSelection} font={CODE_FONT}
               ref={(input) => {
                 field = input;
                 if (input) pollField();
@@ -452,8 +616,23 @@ function SourceEditor(props: { spec: TileSpec; doc: () => ViewerView; paintOffse
           })}>
           {() => <AddToChatChip onPress={addToChat} />}
         </Show>
+        <SessionMenu cwd={props.spec.cwd ?? workspacePath.value} open={menuOpen} captured={menuText} anchor={() => bodyId} />
+        <Box ref={(id) => { contextAnchor = id; }}
+          style={() => ({ position: "absolute", left: contextAt.value[0], top: contextAt.value[1], width: 0, height: 0 })} />
+        <EditorMenu open={contextOpen} anchor={() => contextAnchor} selected={() => caret.value.selected > 0} onAddToChat={addToChat} />
       </Column>
-      <EditorFooter doc={props.doc} caret={() => caret.value} />
+      <EditorFooter doc={props.doc} caret={() => caret.value} status={status}>
+        <Show when={() => !!draft.value?.dirty.value && !draft.value?.pending.value} style={{ shrink: 0 }}>
+          {() => <IconButton icon="trash" label={() => confirmingDiscard.value ? "Confirm discard" : "Discard changes"} size="sm"
+            highlighted={confirmingDiscard} onPress={() => {
+              if (!confirmingDiscard.value) { confirmingDiscard.value = true; return; }
+              editorDrafts.delete(key);
+              draft.value = undefined;
+              confirmingDiscard.value = false;
+              editing.value = false;
+            }} />}
+        </Show>
+      </EditorFooter>
     </Column>
   );
 }
@@ -471,8 +650,9 @@ function footerItems(doc: ViewerView, c: Caret): string[] {
   return items;
 }
 
-// Status line under the source: branch and blame on the left, caret and file facts on the right.
-function EditorFooter(props: { doc: () => ViewerView; caret: () => Caret }): Element {
+// Status line under the source: branch and blame on the left, then the editor's status (saving,
+// unsaved changes, why the file is read-only) and its actions; caret and file facts on the right.
+function EditorFooter(props: { doc: () => ViewerView; caret: () => Caret; status: () => string; children?: Children }): Element {
   const branch = () => {
     void blameVersion.value;
     return branchCache.get(props.doc().path) ?? "";
@@ -498,6 +678,10 @@ function EditorFooter(props: { doc: () => ViewerView; caret: () => Caret }): Ele
           )}
         </Show>
         <Text lines={1} style={{ minWidth: 0 }} font={footerText} paint={() => ({ color: palette().textMuted })}>{blame}</Text>
+      </Row>
+      <Row style={{ shrink: 0, gap: spacing.unit, align: "center" }}>
+        <Text lines={1} font={footerText} paint={() => ({ color: palette().textSecondary })}>{props.status}</Text>
+        {props.children}
       </Row>
       <Row style={{ shrink: 0, gap: spacing.unit * 3, align: "center" }}>
         <For each={() => footerItems(props.doc(), props.caret())} key={(text) => text}

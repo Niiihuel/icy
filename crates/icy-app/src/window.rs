@@ -1,6 +1,7 @@
 //! Native JSNIR window adapted from `jsnir-gpu`'s MIT-licensed host so raw keyboard
 //! input routes directly to the active PTY whenever no TSX text field has focus.
 use crate::browser;
+use crate::pixel_blast::PixelBlast;
 use icy_core::keybinds::{Chord, Keymap, canonical_key};
 use icy_core::platform::editor_command_modifier;
 use icy_core::vt::{CellPoint, SelectKind, modified_enter};
@@ -108,8 +109,6 @@ pub static PALETTE_CAPTURE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 pub static OVERVIEW_CAPTURE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-pub static PROJECT_DIALOG: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 pub static HORIZONTAL_SCROLL_CAPTURE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -175,9 +174,59 @@ pub struct BrowserPointer {
 pub static BROWSER_POINTER: Mutex<Option<BrowserPointer>> = Mutex::new(None);
 /// The focused browser tile (0 = none): keys reach its page unless the TSX has text focus.
 pub static BROWSER_FOCUS: AtomicU64 = AtomicU64::new(0);
+/// A file tile shows its read view and has focus: editing keys go to the TSX editor
+/// (`editorKey`), which selects, copies or starts editing at its caret.
+pub static EDITOR_PREVIEW: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The `editorKey` payload for a key on a file's read view, or None when the view ignores it.
+fn editor_preview_key(
+    input: KeyInput,
+    clipboard: impl FnOnce() -> Option<String>,
+) -> Option<serde_json::Value> {
+    use serde_json::json;
+    Some(match input {
+        KeyInput::Paste => json!({ "insert": clipboard()? }),
+        KeyInput::Edit(EditorEvent::Insert(text)) => json!({ "insert": text }),
+        KeyInput::Edit(EditorEvent::Enter | EditorEvent::LineBreak) => json!({ "insert": "\n" }),
+        KeyInput::Edit(EditorEvent::Delete { backward, .. }) => json!({ "delete": backward }),
+        KeyInput::Edit(EditorEvent::SelectAll) => json!({ "command": "selectAll" }),
+        KeyInput::Edit(EditorEvent::Copy) => json!({ "command": "copy" }),
+        KeyInput::Edit(EditorEvent::Cut) => json!({ "command": "cut" }),
+        KeyInput::Edit(EditorEvent::Cancel) => json!({ "command": "escape" }),
+        KeyInput::Edit(_) => return None,
+    })
+}
+
+/// Overview wheel distance per step: one line-wheel notch (`wheel` scales a line to 40 px)…
+const OVERVIEW_NOTCH_STEP: f32 = 40.0;
+/// …and a longer touchpad swipe, so one gesture does not fly past every workspace.
+const OVERVIEW_TOUCHPAD_STEP: f32 = 160.0;
 
 /// Lines a wheel notch scrolls in a terminal (xterm, alacritty and most terminals use 3).
 const TERMINAL_LINES_PER_NOTCH: f32 = 3.0;
+
+/// Alt+1…9 in the overview: the workspace with that number (`workspace:N` in `ui.tsx`).
+fn overview_workspace_digit(key: &KeyEvent) -> Option<&'static str> {
+    const DIGITS: [&str; 9] = [
+        "workspace:1",
+        "workspace:2",
+        "workspace:3",
+        "workspace:4",
+        "workspace:5",
+        "workspace:6",
+        "workspace:7",
+        "workspace:8",
+        "workspace:9",
+    ];
+    match key.key_without_modifiers() {
+        Key::Character(name) => match name.as_bytes() {
+            [digit @ b'1'..=b'9'] => Some(DIGITS[usize::from(digit - b'1')]),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 fn modal_capture() -> bool {
     MODAL_CAPTURE.load(Ordering::Relaxed) && !PALETTE_CAPTURE.load(Ordering::Relaxed)
@@ -217,6 +266,7 @@ enum Message {
     #[allow(dead_code)]
     DefaultFamily(String),
     Browser(browser::Command),
+    EditorCommand(String),
     Quit,
 }
 
@@ -289,6 +339,10 @@ impl Pusher {
         self.send(Message::Browser(command))
     }
 
+    pub fn editor_command(&self, command: String) -> bool {
+        self.send(Message::EditorCommand(command))
+    }
+
     /// Wakes the event loop without queueing a redraw (used by CEF's message pump scheduler).
     pub fn wake(&self) {
         let _ = self.proxy.send_event(());
@@ -312,9 +366,13 @@ struct AppWindow {
     clipboard: Clipboard,
     /// Wheel / pinch accumulator for modal zoom steps.
     modal_scroll: f32,
+    /// Overview wheel accumulator, [horizontal, vertical], for workspace / column steps.
+    overview_scroll: [f32; 2],
     /// Pointer in logical window pixels, for terminal wheel input and chart hover.
     pointer: Option<[f32; 2]>,
     metrics_pointer: Option<(u16, [f32; 4])>,
+    pixel_blast: PixelBlast,
+    release_blast: PixelBlast,
     release_glow: crate::release_glow::Sampler,
     /// Touchpad pixels not yet worth a whole terminal line.
     terminal_scroll: f32,
@@ -359,8 +417,11 @@ impl AppWindow {
             clicks: Clicks::default(),
             clipboard: Clipboard::default(),
             modal_scroll: 0.0,
+            overview_scroll: [0.0; 2],
             pointer: None,
             metrics_pointer: None,
+            pixel_blast: PixelBlast::default(),
+            release_blast: PixelBlast::release(),
             release_glow: crate::release_glow::Sampler::default(),
             terminal_scroll: 0.0,
             ime_area: ImeArea::default(),
@@ -452,6 +513,33 @@ impl AppWindow {
         self.request_redraw();
     }
 
+    /// A context-menu edit, applied as its key would be: to the focused field, else to a file's
+    /// read view.
+    fn menu_edit(&mut self, command: &str) {
+        let input = match command {
+            "copy" => KeyInput::Edit(EditorEvent::Copy),
+            "cut" => KeyInput::Edit(EditorEvent::Cut),
+            "selectAll" => KeyInput::Edit(EditorEvent::SelectAll),
+            "paste" => KeyInput::Paste,
+            _ => return,
+        };
+        if self.host.focused() {
+            match input {
+                KeyInput::Edit(event) => self.edit(&[event]),
+                KeyInput::Paste => {
+                    if let Some(text) = self.clipboard.text() {
+                        self.edit(&[EditorEvent::Insert(text)]);
+                    }
+                }
+            }
+        } else if EDITOR_PREVIEW.load(Ordering::Relaxed)
+            && let Some(data) = editor_preview_key(input, || self.clipboard.text())
+        {
+            self.host
+                .push(serde_json::json!({ "view": "editorKey", "data": data }).to_string());
+        }
+    }
+
     fn redraw(&mut self, events: &ActiveEventLoop) {
         let started = Instant::now();
         self.wake = None;
@@ -462,6 +550,8 @@ impl AppWindow {
         };
         let size = surface.window.inner_size();
         if size.width == 0 || size.height == 0 {
+            self.pixel_blast.pause();
+            self.release_blast.pause();
             return;
         }
         let acquire = Instant::now();
@@ -473,6 +563,8 @@ impl AppWindow {
                 return;
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
+                self.pixel_blast.pause();
+                self.release_blast.pause();
                 self.wake = Some(Instant::now() + Duration::from_millis(250));
                 return;
             }
@@ -510,8 +602,17 @@ impl AppWindow {
         let pixels = [frame.texture.width(), frame.texture.height()];
         let [width, height] = pixels.map(|side| side as f32 / scale);
         let max_side = surface.renderer.device.limits().max_texture_dimension_2d as usize;
-        let scene = self.host.frame(width, height, scale, max_side);
+        let mut scene = self.host.frame(width, height, scale, max_side);
         let laid_out = Instant::now();
+        let blasts = [&mut self.pixel_blast, &mut self.release_blast].map(|blast| {
+            blast.paint(
+                &mut scene.items,
+                laid_out,
+                self.pointer,
+                self.window_focused,
+            )
+        });
+        self.wake = blasts.into_iter().flatten().min();
         let draws = self
             .view
             .draws(&mut self.host, &mut surface.renderer, scene.items, scale);
@@ -654,6 +755,14 @@ impl AppWindow {
             && x == 0.
             && (overview || HORIZONTAL_SCROLL_CAPTURE.load(Ordering::Relaxed));
         let horizontal = x.abs() > y.abs() || shifted_wheel;
+        if overview {
+            self.overview_wheel(
+                if horizontal { 0 } else { 1 },
+                if x == 0. { y } else { x },
+                smooth,
+            );
+            return;
+        }
         if !overlay && let Some((pointer, local)) = self.pointer.and_then(|p| self.browser_hit(p)) {
             // Chromium expects standard 120 units per wheel notch for smooth native scrolling.
             let (bx, by) = match delta {
@@ -696,13 +805,41 @@ impl AppWindow {
         }
     }
 
+    /// niri overview: the wheel steps the selection one workspace up / down, a horizontal wheel
+    /// (or Shift+wheel) one column left / right. A notch is one step; a touchpad needs a longer
+    /// swipe so one gesture does not fly past every workspace.
+    fn overview_wheel(&mut self, axis: usize, delta: f32, notch: bool) {
+        let step = if notch {
+            OVERVIEW_NOTCH_STEP
+        } else {
+            OVERVIEW_TOUCHPAD_STEP
+        };
+        self.overview_scroll[1 - axis] = 0.0;
+        let scroll = &mut self.overview_scroll[axis];
+        *scroll += delta;
+        let mut actions = Vec::new();
+        while scroll.abs() >= step {
+            let back = *scroll > 0.0;
+            *scroll -= step.copysign(*scroll);
+            actions.push(match (axis, back) {
+                (0, true) => "left",
+                (0, false) => "right",
+                (_, true) => "workspaceUp",
+                (_, false) => "workspaceDown",
+            });
+        }
+        for action in actions {
+            (self.hooks.on_shortcut)(WindowShortcut::Modal(action));
+        }
+    }
+
     /// A vertical wheel over a terminal grid: whole lines to that session. Returns whether it took it.
     fn terminal_wheel(&mut self, delta: MouseScrollDelta) -> bool {
-        let Some(target) = *TERMINAL_WHEEL.lock().unwrap() else {
-            self.terminal_scroll = 0.0;
+        let Some(point) = self.pointer else {
             return false;
         };
-        let Some(point) = self.pointer else {
+        let Some(target) = self.terminal_hit(point) else {
+            self.terminal_scroll = 0.0;
             return false;
         };
         let cell_h = target.cell[1].max(1.0);
@@ -746,8 +883,7 @@ impl AppWindow {
 
     fn select_in_terminal(&mut self, select: PointSelection, point: Option<[f32; 2]>) {
         let previous = self.term_selection.take();
-        let target = *TERMINAL_WHEEL.lock().unwrap();
-        let (Some(target), Some(point)) = (target, point) else {
+        let Some((target, point)) = point.and_then(|p| self.terminal_hit(p).map(|t| (t, p))) else {
             if let Some(old) = previous {
                 (self.hooks.on_terminal_select)(old.target.session, TerminalSelect::Clear);
             }
@@ -773,11 +909,17 @@ impl AppWindow {
         });
     }
 
+    fn terminal_hit(&self, [x, y]: [f32; 2]) -> Option<TerminalWheelTarget> {
+        // Hover updates cross the JS bridge and may still point at the previous pane.
+        let target = (*TERMINAL_WHEEL.lock().unwrap())?;
+        let [left, top, width, height] = self.host.screen_rect(target.grid)?;
+        ((left..left + width).contains(&x) && (top..top + height).contains(&y)).then_some(target)
+    }
+
     /// The browser under `point` (logical window pixels) and the point in its page's pixels. A
     /// press that began on a browser keeps it, so a drag can leave the rectangle.
     fn browser_hit(&self, point: [f32; 2]) -> Option<(BrowserPointer, [f32; 2])> {
-        if PROJECT_DIALOG.load(Ordering::Relaxed)
-            || PALETTE_CAPTURE.load(Ordering::Relaxed)
+        if PALETTE_CAPTURE.load(Ordering::Relaxed)
             || OVERVIEW_CAPTURE.load(Ordering::Relaxed)
             || modal_capture()
         {
@@ -800,7 +942,6 @@ impl AppWindow {
         let id = BROWSER_FOCUS.load(Ordering::Relaxed);
         let blocked = self.host.focused()
             || KEY_CAPTURE.load(Ordering::Relaxed)
-            || PROJECT_DIALOG.load(Ordering::Relaxed)
             || PALETTE_CAPTURE.load(Ordering::Relaxed)
             || modal_capture()
             || OVERVIEW_CAPTURE.load(Ordering::Relaxed);
@@ -810,6 +951,12 @@ impl AppWindow {
     fn mouse(&mut self, state: ElementState, point: Option<[f32; 2]>) {
         match state {
             ElementState::Pressed => {
+                if self.window_focused
+                    && let Some(point) = point
+                {
+                    self.pixel_blast.press(point);
+                    self.release_blast.press(point);
+                }
                 let select = self
                     .clicks
                     .select(point.unwrap_or_default(), self.modifiers.shift_key());
@@ -827,6 +974,7 @@ impl AppWindow {
                 }
                 if !PALETTE_CAPTURE.load(Ordering::Relaxed)
                     && !OVERVIEW_CAPTURE.load(Ordering::Relaxed)
+                    && !modal_capture()
                     && browser_press.is_none()
                 {
                     self.select_in_terminal(select, point);
@@ -867,19 +1015,6 @@ impl AppWindow {
             }
             return;
         }
-        // Alt used for a chord (Alt+Left, Alt+H…) is not a request for the agent digits.
-        if only_alt(self.modifiers)
-            && !matches!(
-                key.key_without_modifiers(),
-                Key::Named(NamedKey::Alt | NamedKey::AltGraph)
-            )
-            && !matches!(key.key_without_modifiers(), Key::Character(c) if c.len() == 1 && c.as_bytes()[0].is_ascii_digit())
-        {
-            self.host.push_keyed(
-                "agentDigitsHeld",
-                r#"{"view":"agentDigitsHeld","data":false}"#.into(),
-            );
-        }
         // Settings is recording a new shortcut: the next chord goes there (Esc cancels).
         if KEY_CAPTURE.load(Ordering::Relaxed) {
             if let Some(chord) = chord_of(&key, self.modifiers) {
@@ -893,37 +1028,8 @@ impl AppWindow {
             }
             return;
         }
-        let project_dialog = PROJECT_DIALOG.load(Ordering::Relaxed);
-        let palette_capture = !project_dialog && PALETTE_CAPTURE.load(Ordering::Relaxed);
-        let overview_capture =
-            !project_dialog && !palette_capture && OVERVIEW_CAPTURE.load(Ordering::Relaxed);
-        if project_dialog {
-            // The session launcher's own keys; the rest edit its search field.
-            let action = match key.key_without_modifiers() {
-                Key::Named(NamedKey::Escape) => Some("escape"),
-                Key::Named(NamedKey::ArrowUp) if self.modifiers.is_empty() => Some("up"),
-                Key::Named(NamedKey::ArrowDown) if self.modifiers.is_empty() => Some("down"),
-                Key::Named(NamedKey::Tab) if self.modifiers.is_empty() => Some("tab"),
-                Key::Named(NamedKey::Enter) if !self.host.focused() && !key.repeat => Some("enter"),
-                Key::Character(c) if only_alt(self.modifiers) => match c.as_str() {
-                    "1" => Some("agent1"),
-                    "2" => Some("agent2"),
-                    "3" => Some("agent3"),
-                    "4" => Some("agent4"),
-                    "5" => Some("agent5"),
-                    "6" => Some("agent6"),
-                    "7" => Some("agent7"),
-                    "8" => Some("agent8"),
-                    "9" => Some("agent9"),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(action) = action {
-                (self.hooks.on_shortcut)(WindowShortcut::Modal(action));
-                return;
-            }
-        }
+        let palette_capture = PALETTE_CAPTURE.load(Ordering::Relaxed);
+        let overview_capture = !palette_capture && OVERVIEW_CAPTURE.load(Ordering::Relaxed);
         if overview_capture
             && let Some(id @ ("view.overview" | "panel.side" | "session.search")) =
                 chord_of(&key, self.modifiers).and_then(|chord| KEYMAP.read().ok()?.resolve(&chord))
@@ -931,48 +1037,65 @@ impl AppWindow {
             (self.hooks.on_shortcut)(WindowShortcut::Modal(id));
             return;
         }
-        if !project_dialog && (modal_capture() || overview_capture) {
-            let action = match &key.logical_key {
+        if modal_capture() || overview_capture {
+            // The overview filter field has the focus: only these keys leave it, the rest type.
+            let typing = overview_capture && self.host.focused();
+            let digit = (overview_capture && only_alt(self.modifiers))
+                .then(|| overview_workspace_digit(&key))
+                .flatten();
+            let action = digit.or(match &key.logical_key {
                 Key::Named(NamedKey::Escape) => Some("escape"),
                 Key::Named(NamedKey::Enter) => Some("enter"),
-                Key::Named(NamedKey::ArrowLeft) => Some("left"),
-                Key::Named(NamedKey::ArrowRight) => Some("right"),
                 Key::Named(NamedKey::ArrowUp) => Some("up"),
                 Key::Named(NamedKey::ArrowDown) => Some("down"),
+                Key::Named(NamedKey::Tab) if typing => Some("tab"),
+                _ if typing => None,
+                Key::Named(NamedKey::ArrowLeft) => Some("left"),
+                Key::Named(NamedKey::ArrowRight) => Some("right"),
                 Key::Named(NamedKey::Home) => Some("first"),
                 Key::Named(NamedKey::End) => Some("last"),
                 Key::Character(c) => match c.as_str() {
                     "+" | "=" => Some("zoomIn"),
                     "-" | "_" => Some("zoomOut"),
                     "0" => Some("reset"),
+                    "/" if overview_capture => Some("filter"),
                     _ => None,
                 },
                 _ => None,
-            };
+            });
             if let Some(action) = action {
                 (self.hooks.on_shortcut)(WindowShortcut::Modal(action));
+                return;
             }
-            return;
+            if !typing {
+                return;
+            }
         }
 
         if palette_capture {
-            let action = if let Some(id @ ("panel.side" | "session.search")) =
-                chord_of(&key, self.modifiers).and_then(|chord| KEYMAP.read().ok()?.resolve(&chord))
-            {
-                Some(id)
-            } else {
-                match key.logical_key {
-                    Key::Named(NamedKey::Escape) => Some("escape"),
-                    Key::Named(NamedKey::ArrowUp) if self.modifiers.is_empty() => Some("up"),
-                    Key::Named(NamedKey::ArrowDown) if self.modifiers.is_empty() => Some("down"),
-                    Key::Named(NamedKey::Enter)
-                        if !self.host.focused() && !key.repeat && self.modifiers.is_empty() =>
-                    {
-                        Some("enter")
+            let action =
+                if let Some(id @ ("panel.side" | "session.search" | "workspace.switcher")) =
+                    chord_of(&key, self.modifiers)
+                        .and_then(|chord| KEYMAP.read().ok()?.resolve(&chord))
+                {
+                    Some(id)
+                } else {
+                    match key.logical_key {
+                        Key::Named(NamedKey::Escape) => Some("escape"),
+                        Key::Named(NamedKey::ArrowUp) if self.modifiers.is_empty() => Some("up"),
+                        Key::Named(NamedKey::ArrowDown) if self.modifiers.is_empty() => {
+                            Some("down")
+                        }
+                        Key::Named(NamedKey::Tab) if self.modifiers.is_empty() => Some("tab"),
+                        Key::Named(NamedKey::Enter) if key.repeat => return,
+                        Key::Named(NamedKey::Enter)
+                            if !self.host.focused() && self.modifiers.is_empty() =>
+                        {
+                            Some("enter")
+                        }
+                        _ => None,
                     }
-                    _ => None,
-                }
-            };
+                };
             if let Some(action) = action {
                 self.host
                     .push(format!(r#"{{"view":"modalKey","data":"{action}"}}"#));
@@ -982,8 +1105,7 @@ impl AppWindow {
         }
 
         // Ctrl+Shift+V pastes into the terminal: a terminal convention, not a remappable action.
-        if !project_dialog
-            && !palette_capture
+        if !palette_capture
             && !self.host.focused()
             && self.modifiers.control_key()
             && self.modifiers.shift_key()
@@ -1000,8 +1122,7 @@ impl AppWindow {
 
         // Ctrl+Shift+C copies the terminal selection; Ctrl+C does too while there is one (and
         // clears it), otherwise it stays the interrupt.
-        if !project_dialog
-            && !palette_capture
+        if !palette_capture
             && !self.host.focused()
             && self.modifiers.control_key()
             && !self.modifiers.alt_key()
@@ -1023,12 +1144,25 @@ impl AppWindow {
             }
         }
 
+        // A browser pane's address bar: the pane keeps the app's chords and Escape hands the keys
+        // to its page, as a browser's omnibox does (JSNIR gap 19: only the host can blur a field).
+        let address_bar = self.host.focused() && BROWSER_FOCUS.load(Ordering::Relaxed) != 0;
+        if address_bar
+            && !palette_capture
+            && matches!(key.logical_key, Key::Named(NamedKey::Escape))
+        {
+            self.host.escape();
+            self.host.focus(None);
+            self.sync_ime();
+            self.request_redraw();
+            return;
+        }
+
         // User-editable shortcuts (Settings › Layout & Shortcuts). Ctrl+Shift chords also work
         // while a text field has focus; the rest only when the keyboard belongs to the terminal.
-        if !project_dialog
-            && !palette_capture
+        if !palette_capture
             && let Some(chord) = chord_of(&key, self.modifiers)
-            && (!self.host.focused() || chord.fires_in_text_fields())
+            && (!self.host.focused() || address_bar || chord.fires_in_text_fields())
             && let Some(id) = KEYMAP.read().ok().and_then(|map| map.resolve(&chord))
             && (self.hooks.on_shortcut)(WindowShortcut::Action(id))
         {
@@ -1056,16 +1190,15 @@ impl AppWindow {
             return;
         }
 
-        if !project_dialog
-            && !palette_capture
+        if !palette_capture
             && !self.host.focused()
             && only_alt(self.modifiers)
             && let Key::Character(key_name) = key.key_without_modifiers()
-            && let [digit @ b'0'..=b'9'] = key_name.as_bytes()
+            && let [digit @ b'1'..=b'9'] = key_name.as_bytes()
         {
             let digit = digit - b'0';
             let count = AGENT_SHORTCUT_COUNT.load(Ordering::Relaxed);
-            if count != 0 && u16::from(digit) <= count {
+            if u16::from(digit) <= count {
                 if !key.repeat {
                     self.host
                         .push(format!(r#"{{"view":"agentDigit","data":{digit}}}"#));
@@ -1082,8 +1215,7 @@ impl AppWindow {
                 self.modifiers.alt_key(),
                 self.modifiers.super_key(),
             );
-            if !project_dialog
-                && !palette_capture
+            if !palette_capture
                 && !key.repeat
                 && chord_of(&key, self.modifiers).and_then(|c| KEYMAP.read().ok()?.resolve(&c))
                     == Some("editor.addToChat")
@@ -1094,7 +1226,6 @@ impl AppWindow {
                 return;
             }
             if command
-                && !project_dialog
                 && !palette_capture
                 && !self.modifiers.shift_key()
                 && !key.repeat
@@ -1106,6 +1237,9 @@ impl AppWindow {
             }
             if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
                 self.host.escape();
+                // A clean file editor goes back to its read view.
+                self.host
+                    .push(r#"{"view":"editorKey","data":{"command":"escape"}}"#.into());
                 self.sync_ime();
                 self.request_redraw();
                 return;
@@ -1122,7 +1256,23 @@ impl AppWindow {
             return;
         }
 
-        if project_dialog || palette_capture {
+        if palette_capture {
+            return;
+        }
+
+        if EDITOR_PREVIEW.load(Ordering::Relaxed)
+            && !modal_capture()
+            && !OVERVIEW_CAPTURE.load(Ordering::Relaxed)
+            && let Some(input) = editor_key(&key, self.modifiers)
+        {
+            if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
+                self.host.escape();
+            }
+            if let Some(data) = editor_preview_key(input, || self.clipboard.text()) {
+                self.host
+                    .push(serde_json::json!({ "view": "editorKey", "data": data }).to_string());
+                self.request_redraw();
+            }
             return;
         }
 
@@ -1243,16 +1393,15 @@ impl ApplicationHandler for AppWindow {
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
                 if !focused {
-                    self.host.push_keyed(
-                        "agentDigitsHeld",
-                        r#"{"view":"agentDigitsHeld","data":false}"#.into(),
-                    );
+                    self.pixel_blast.pause();
+                    self.release_blast.pause();
                     self.edit(&[EditorEvent::Preedit {
                         text: String::new(),
                         active: None,
                     }]);
                 }
                 self.sync_ime();
+                self.request_redraw();
             }
             WindowEvent::MouseInput {
                 state,
@@ -1271,16 +1420,7 @@ impl ApplicationHandler for AppWindow {
                 self.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                let was_alt = only_alt(self.modifiers);
                 self.modifiers = modifiers.state();
-                let alt = only_alt(self.modifiers);
-                if was_alt != alt {
-                    self.host.push_keyed(
-                        "agentDigitsHeld",
-                        format!(r#"{{"view":"agentDigitsHeld","data":{alt}}}"#),
-                    );
-                    self.request_redraw();
-                }
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -1300,6 +1440,7 @@ impl ApplicationHandler for AppWindow {
 
     fn user_event(&mut self, events: &ActiveEventLoop, _: ()) {
         let mut redraw = false;
+        let mut edits = Vec::new();
         for message in self.inbox.try_iter() {
             redraw = true;
             match message {
@@ -1314,11 +1455,15 @@ impl ApplicationHandler for AppWindow {
                     }
                     self.browsers.apply(command);
                 }
+                Message::EditorCommand(command) => edits.push(command),
                 Message::Quit => {
                     events.exit();
                     return;
                 }
             }
+        }
+        for command in edits {
+            self.menu_edit(&command);
         }
         if redraw {
             self.request_redraw();

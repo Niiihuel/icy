@@ -65,13 +65,8 @@ interface SessionItem {
   status?: "idle" | "working" | "blocked" | "done" | "failed";
 }
 
-// A closed session, kept by the host until icy quits.
-interface ArchivedItem {
-  id: number;
-  title: string;
-  cli: string;
-  cwd: string;
-  closedAt: number;
+interface ArchivedItem extends SessionItem {
+  archivedAt: number;
 }
 
 interface SessionsView {
@@ -260,6 +255,7 @@ interface ViewerView {
   cwd?: string;
   requestedPath?: string;
   background?: boolean;
+  intent?: number;
   open: boolean;
   path: string;
   displayPath: string;
@@ -604,12 +600,19 @@ function sendHello(): void {
   requestHost({ type: "hello" });
 }
 
+// A document can finish after another window was opened, even if its result was already queued.
+let documentIntent = 0;
+
+function requestDocument(payload: Record<string, unknown>): void {
+  requestHost({ ...payload, intent: ++documentIntent });
+}
+
 function openLink(link: DetectedLink, sessionId?: number): void {
   if (link.kind === "url") {
     openBrowser(link.target, sessionsState.value.items.find((session) => session.id === sessionId)?.cwd);
     return;
   }
-  requestHost({
+  requestDocument({
     type: link.kind === "diff" ? "openDiff" : "open",
     kind: link.kind,
     path: link.target,
@@ -626,11 +629,13 @@ function createSession(): void {
 }
 
 function openTiledColumn(): void {
+  ++documentIntent;
   activeNav.value = "agents";
   requestHost({ type: "openColumn" });
 }
 
 function stackTiledVertical(): void {
+  ++documentIntent;
   activeNav.value = "agents";
   requestHost({ type: "stackVertical" });
 }
@@ -653,10 +658,12 @@ function launchCli(cliId: string): void {
 }
 
 function closeSession(id: number): void {
+  ++documentIntent;
   requestHost({ type: "closeSession", id });
 }
 
 function selectSession(id: number): void {
+  ++documentIntent;
   requestHost({ type: "selectSession", id });
 }
 
@@ -766,13 +773,34 @@ function allWindowIds(): number[] {
   return workspaceList().flatMap((w) => w.panes);
 }
 
+// A window's short name: an agent's title, a shell's folder, a tile's title.
+function windowLabel(id: number): string {
+  const session = sessionsState.value.items.find((s) => s.id === id);
+  if (session) return session.cli === "terminal" ? basename(session.cwd) || "Terminal" : cleanTitle(session.title);
+  const spec = tileOf(id);
+  return spec ? tileTitle(spec, id) : "";
+}
+
+// Workspaces have no names of their own: one reads as the folder of its focused (or first) terminal.
+function workspaceLabel(index: number): string {
+  const workspace = workspaceList()[index];
+  if (!workspace?.panes.length) return "Empty workspace";
+  const sessions = sessionsState.value.items;
+  const session = [workspace.focused, ...workspace.panes].map((id) => sessions.find((s) => s.id === id))
+    .find((s) => !!s);
+  if (session) return basename(session.cwd) || cleanTitle(session.title);
+  return windowLabel(workspace.focused || workspace.panes[0]) || `Workspace ${index + 1}`;
+}
+
 function focusWorkspace(index: number): void {
+  ++documentIntent;
   activeNav.value = "agents";
   requestHost({ type: "focusWorkspace", index });
 }
 
 function isTerminalId(id: number): boolean {
-  return sessionsState.value.items.some((s) => s.id === id);
+  const sessions = sessionsState.value;
+  return sessions.items.some((s) => s.id === id) || (sessions.archived?.some((s) => s.id === id) ?? false);
 }
 
 // A non-terminal window falls back to Files if its UI spec is missing.
@@ -873,6 +901,8 @@ function setTile(id: number, spec: TileSpec, load = true): void {
 
 // Opens a window beside the focused one (`stack`: below it) and focuses it.
 function openTile(spec: TileSpec, stack = false, load = true): void {
+  ++documentIntent;
+  if (overviewOpen2.value) closeOverviewMode();
   activeNav.value = "agents";
   let id = 0;
   try {
@@ -886,7 +916,8 @@ function openTile(spec: TileSpec, stack = false, load = true): void {
 function focusTile(id: number): void {
   activeNav.value = "agents";
   if (overviewOpen2.value) pickFromOverview(id);
-  else if (tilingState.value.focusedSession !== id) selectSession(id);
+  // Consecutive clicks can arrive before the host's next tiling snapshot.
+  else selectSession(id);
 }
 
 type SingleTileKind = "files" | "review" | "overview" | "metrics" | "archived";
@@ -912,10 +943,20 @@ function toggleTile(kind: SingleTileKind): void {
 // keep independent previews.
 function openDocTile(spec: TileSpec): void {
   const key = docKey(spec);
+  const view = tilingState.value;
+  const activeColumn = view.columns.findIndex((column) => column.panes.includes(view.focusedSession));
+  const next = view.columns[activeColumn + 1];
+  // In niri, a reused preview should be where a new column would open (or be the current preview).
+  const reusable = view.mode === "niri"
+    ? [view.focusedSession, ...(!view.maximized && next?.panes.length === 1 ? next.panes : [])]
+    : paneOrder();
   const target =
     findTile((s) => (s.kind === "file" || s.kind === "diff") && docKey(s) === key) ??
-    findTile((s) => (s.kind === "file" || s.kind === "diff") && !s.pinned && !editorDrafts.has(docKey(s))
-      && s.cwd === spec.cwd && !!s.edit === !!spec.edit);
+    reusable.find((id) => {
+      const s = tileSpecs.value[id];
+      return s && (s.kind === "file" || s.kind === "diff") && !s.pinned && !editorDrafts.has(docKey(s))
+        && s.cwd === spec.cwd && !!s.edit === !!spec.edit;
+    });
   if (target === undefined) {
     openTile(spec, false, false);
     return;
@@ -936,7 +977,6 @@ function resolveAddress(text: string, search: boolean): string {
 
 // Each launch gets an independent pane, including a blank page from the sidebar.
 function openBrowser(url?: string, cwd = workspacePath.value): void {
-  if (overviewOpen2.value) closeOverviewMode();
   openTile({ kind: "browser", path: "", url, cwd }, false, false);
 }
 
@@ -1016,6 +1056,7 @@ function toggleOverview(): void {
 
 // A file or diff pushed by the host: cache it; route it to a window unless a window asked for it.
 function receiveDoc(view: ViewerView): void {
+  if (!view.background && view.intent !== undefined && view.intent !== documentIntent) return;
   if (!view.open && !view.error) return;
   const path = view.requestedPath ?? (view.displayPath || view.path);
   const spec: TileSpec = {
@@ -1104,11 +1145,11 @@ function setWorkspacePath(cwd: string): void {
 }
 
 function openFile(path: string, line?: number, cwd = workspacePath.value): void {
-  requestHost({ type: "open", kind: "file", path, line: line ?? null, col: null, cwd });
+  requestDocument({ type: "open", kind: "file", path, line: line ?? null, col: null, cwd });
 }
 
 function openDiff(path: string, cwd = workspacePath.value): void {
-  requestHost({ type: "openDiff", path, cwd });
+  requestDocument({ type: "openDiff", path, cwd });
 }
 
 function toggleTreeDir(path: string, cwd: string): void {
@@ -1219,15 +1260,17 @@ function IconButton(props: {
   size?: "sm" | "md";
   side?: Side;
   layer?: number;
+  tooltipDisabled?: Source<boolean>;
   disabled?: Source<boolean>;
   highlighted?: Source<boolean>;
+  hoverBackground?: Source<number>;
   onPress: () => void;
 }): Element {
   const highlighted = () => read(props.highlighted ?? false);
   const layout = iconButtonLayout[props.size ?? "md"];
   return (
     <HintTooltip label={props.label} detail={props.detail} keys={props.keys} side={props.side ?? "top"}
-      layer={props.layer} style={{ shrink: 0 }}>
+      layer={props.layer} disabled={props.tooltipDisabled} style={{ shrink: 0 }}>
       <Box
         style={{ width: layout.size, height: layout.size, align: "center", justify: "center", shrink: 0 }}
         disabled={props.disabled}
@@ -1236,7 +1279,7 @@ function IconButton(props: {
           radius: radii.md,
           background: highlighted() ? accent().brandSoft : 0,
           opacity: read(props.disabled ?? false) ? controlState.disabledOpacity : 1,
-          hover: { background: highlighted() ? accent().brandSoft : palette().sidebarActive },
+          hover: { background: highlighted() ? accent().brandSoft : read(props.hoverBackground ?? palette().sidebarActive) },
           active: { scale: controlState.iconPressScale },
           transitions: [smoothTransition("background", motion.fast), smoothTransition("scale", motion.fast)],
         })}
@@ -1567,6 +1610,7 @@ function EmptyState(props: {
   title: Source<string>;
   detail?: Source<string>;
   compact?: boolean;
+  centered?: boolean;
   style?: Style;
   children?: Children;
 }): Element {
@@ -1574,7 +1618,7 @@ function EmptyState(props: {
   return (
     <Column style={{ minWidth: 0, shrink: 0, gap: emptyStateLayout.actionGap, ...props.style }}>
       <Column style={{ padding: [0, inset, 0, inset], gap: emptyStateLayout.detailGap }}>
-        <Text
+        <Text align={props.centered ? "center" : undefined}
           font={{
             family: fontFamilies.sans,
             size: props.compact ? typeScale.caption : typeScale.title,
@@ -1585,12 +1629,35 @@ function EmptyState(props: {
           {props.title}
         </Text>
         {props.detail === undefined ? null : (
-          <Text font={{ family: fontFamilies.sans, size: typeScale.label }}
+          <Text align={props.centered ? "center" : undefined}
+            font={{ family: fontFamilies.sans, size: typeScale.label }}
             paint={() => ({ color: palette().textMuted })}>{props.detail}</Text>
         )}
       </Column>
       {props.children ? <Column>{props.children}</Column> : null}
     </Column>
+  );
+}
+
+function SessionMenuButton(props: {
+  open: Signal<boolean>;
+  visible: Source<boolean>;
+  side: Side;
+  children: Children;
+}): Element {
+  let anchor: number | undefined;
+  const size = iconButtonLayout.sm.size;
+  return (
+    <Box ref={(id) => { anchor = id; }} style={{ width: size, height: size, shrink: 0 }}>
+      <Show when={() => read(props.visible) || props.open.value}>
+        {() => <IconButton icon="more-horizontal" label="Session actions" size="sm" side={props.side} tooltipDisabled={props.open}
+          hoverBackground={rowHoverBackground}
+          highlighted={props.open} onPress={() => { props.open.value = !props.open.value; }} />}
+      </Show>
+      <MenuPanel open={props.open} anchor={() => anchor} side={props.side} align={props.side === "bottom" ? "end" : "start"}>
+        {props.children}
+      </MenuPanel>
+    </Box>
   );
 }
 
@@ -1709,21 +1776,32 @@ function HintTooltip(props: {
   side?: Side;
   delay?: number;
   layer?: number;
+  disabled?: Source<boolean>;
   style?: Source<Style>;
   // Rich content under the label (sections, rows); rebuilt on every open so it is current.
   body?: () => Element;
   children: Element;
 }): Element {
+  const layout = tooltipLayout;
   const open = signal(false);
   const side: Side = props.side ?? "right";
   let wrapper: number | undefined;
+  let bubbleId: number | undefined;
   let hovering = false;
   let token = 0;
+  const disabled = () => read(props.disabled ?? false);
+  if (props.disabled !== undefined) {
+    effect(() => {
+      if (disabled()) {
+        ++token;
+        open.value = false;
+      }
+    });
+  }
 
   const header = (
     <Row
-      style={{ height: 26, padding: props.body ? 0 : [0, 8, 0, 8], align: "center", gap: 6, shrink: 0 }}
-      paint={() => ({ radius: radii.md, background: props.body ? 0 : palette().tooltipBg })}
+      style={{ height: layout.height, align: "center", gap: layout.headerGap, shrink: 0 }}
     >
       <Text
         lines={1}
@@ -1744,7 +1822,7 @@ function HintTooltip(props: {
       {props.keys !== undefined ? (
         <Dynamic value={() => read(props.keys ?? []).join("\u0001")} style={{ shrink: 0 }}>
           {(joined) => (
-        <Row style={{ align: "center", gap: 3, margin: [0, -3, 0, 0], shrink: 0 }}>
+        <Row style={{ align: "center", gap: layout.keyGap, margin: [0, -layout.keyGap, 0, 0], shrink: 0 }}>
           {(joined ? joined.split("\u0001") : []).map((k) =>
             k === "then" ? (
               <Text
@@ -1755,7 +1833,8 @@ function HintTooltip(props: {
               </Text>
             ) : (
               <Box
-                style={{ minWidth: 18, height: 18, padding: [0, 4, 0, 4], align: "center", justify: "center" }}
+                style={{ minWidth: layout.keySize, height: layout.keySize, padding: [0, spacing.unit, 0, spacing.unit],
+                  align: "center", justify: "center" }}
                 paint={() => ({ radius: radii.sm, background: palette().tooltipKbdBg })}
               >
                 <Text
@@ -1774,27 +1853,20 @@ function HintTooltip(props: {
     </Row>
   );
   const body = props.body;
-  const bubble = body ? (
-    <Column style={{ padding: [spacing.unit, spacing.unit * 3, spacing.unit * 3, spacing.unit * 3], shrink: 0 }}
-      paint={() => ({ radius: radii.lg, background: palette().tooltipBg })}>
+  const radius = body ? radii.lg : radii.md;
+  const placement = signal<PopoverPlacement | undefined>(undefined);
+  const placedSide = () => placement.value?.side ?? side;
+  const caretDepth = layout.caretSize / 2;
+  const caretInset = caretDepth - layout.caretOverlap;
+  const bubble = (
+    <Column ref={(id) => { bubbleId = id; }} style={{
+      padding: body ? [spacing.unit, spacing.unit * 3, spacing.unit * 3, spacing.unit * 3]
+        : [0, layout.padding, 0, layout.padding],
+      shrink: 0,
+    }} paint={() => ({ radius, background: palette().tooltipBg })}>
       {header}
-      <Dynamic value={() => open.value}>{(visible) => (visible ? body() : <Box />)}</Dynamic>
+      {body ? <Dynamic value={() => open.value}>{(visible) => (visible ? body() : <Box />)}</Dynamic> : null}
     </Column>
-  ) : header;
-  // Resolved placement: the side after flipping and the anchor centre along the bubble edge, so
-  // the caret keeps pointing at the anchor when the tooltip is flipped or pushed off a window edge.
-  const placedSide = signal<Side>(side);
-  const anchorOffset = signal(-1);
-  const CARET = 5;
-  const caretAt = () => Math.max(CARET + 4, anchorOffset.value) - CARET;
-  const caret = (glyph: string, style: () => Style) => (
-    <Box style={style}>
-      <Image
-        source={"glyph:" + glyph}
-        style={{ width: 10, height: 10 }}
-        paint={() => ({ color: palette().tooltipBg })}
-      />
-    </Box>
   );
 
   return (
@@ -1806,12 +1878,13 @@ function HintTooltip(props: {
       onHover={(inside) => {
         hovering = inside;
         const mine = ++token;
-        if (!inside) {
+        if (!inside || disabled()) {
           open.value = false;
           return;
         }
-        afterView(props.delay ?? 250, () => {
-          if (hovering && mine === token) open.value = true;
+        placement.value = undefined;
+        afterView(props.delay ?? layout.delay, () => {
+          if (hovering && mine === token && !disabled()) open.value = true;
         });
       }}
     >
@@ -1821,30 +1894,39 @@ function HintTooltip(props: {
         anchor={() => wrapper}
         side={side}
         align="center"
-        layer={props.layer ?? 1000}
+        gap={layout.anchorGap}
+        layer={props.layer ?? layout.layer}
         onPlacement={(p) => {
-          placedSide.value = p.side;
-          anchorOffset.value = p.anchorOffset;
+          if (bubbleId === undefined) return;
+          const vertical = p.side === "top" || p.side === "bottom";
+          const edge = vertical ? jsnir.columns.width[bubbleId] : jsnir.columns.height[bubbleId];
+          const clearance = Math.min(edge / 2, radius + caretDepth);
+          const offset = edge > 0 ? Math.max(clearance, Math.min(edge - clearance, p.anchorOffset)) : p.anchorOffset;
+          placement.value = { side: p.side, anchorOffset: offset };
         }}
-        paint={() => accordeeTooltipMotion(placedSide.value)}
+        paint={() => ({ ...accordeeTooltipMotion(placedSide()), a11y: { role: "tooltip" } })}
       >
-        <Dynamic value={() => placedSide.value}>
+        <Dynamic value={placedSide}>
           {(at) => {
-            // A 5px strip on the anchor side holds the caret, positioned along it at the anchor.
             const vertical = at === "top" || at === "bottom";
-            const strip = (glyph: string, shift: number) => (
-              <Box style={{ width: vertical ? undefined : CARET, height: vertical ? CARET : undefined, shrink: 0, clip: true }}>
-                {caret(glyph, () =>
-                  vertical
-                    ? { position: "absolute", left: anchorOffset.value < 0 ? undefined : caretAt(), top: shift, width: 10, height: 10 }
-                    : { position: "absolute", top: anchorOffset.value < 0 ? undefined : caretAt(), left: shift, width: 10, height: 10 }
-                )}
+            const leading = at === "right" || at === "bottom";
+            const glyph = { top: "caret-down", bottom: "caret-up", left: "caret-right", right: "caret-left" }[at];
+            // The caret's base overlaps the bubble. Leave both in the same paint and motion group.
+            const slot = (
+              <Box style={vertical ? { height: caretInset, shrink: 0 } : { width: caretInset, shrink: 0 }}>
+                <Show when={() => placement.value !== undefined} style={() => {
+                  const along = (placement.value?.anchorOffset ?? caretDepth) - caretDepth;
+                  const across = leading ? -caretDepth : -layout.caretOverlap;
+                  return { position: "absolute", left: vertical ? along : across, top: vertical ? across : along,
+                    width: layout.caretSize, height: layout.caretSize };
+                }}>
+                  {() => <Glyph name={glyph} size={layout.caretSize} color={() => palette().tooltipBg} />}
+                </Show>
               </Box>
             );
-            if (at === "right") return <Row style={{ align: "stretch" }}>{strip("caret-left", -CARET)}{bubble}</Row>;
-            if (at === "left") return <Row style={{ align: "stretch" }}>{bubble}{strip("caret-right", 0)}</Row>;
-            if (at === "bottom") return <Column style={{ align: "stretch" }}>{strip("caret-up", -CARET)}{bubble}</Column>;
-            return <Column style={{ align: "stretch" }}>{bubble}{strip("caret-down", 0)}</Column>;
+            return <Box style={{ direction: vertical ? "column" : "row", align: "stretch" }}>
+              {leading ? [slot, bubble] : [bubble, slot]}
+            </Box>;
           }}
         </Dynamic>
       </Popover>
@@ -1853,9 +1935,8 @@ function HintTooltip(props: {
 }
 
 
-// ---- Session titles: agent CLIs put an animated spinner glyph in front of their OSC title while
-// they work (Codex braille ⠋⠙…, Claude Code ·✢✶✻✽ or ◐◓◑◒; ✳ is Claude idle). We strip it and let
-// the tab strip shimmer while the session works; lists and pane headers keep a static state badge.
+// Agent CLIs put a spinner glyph in front of their OSC title (Codex braille ⠋⠙…,
+// Claude Code ·✢✶✻✽ or ◐◓◑◒; ✳ is Claude idle). Keep the title and status distinct.
 const SPINNER_GLYPHS = "·✢✶✻✽*◐◓◑◒";
 
 function titleSpinner(title: string): string | null {
@@ -1883,121 +1964,91 @@ function sessionWorking(s: SessionItem | undefined): boolean {
   return !!s && s.alive && (s.status ? s.status === "working" : isWorkingTitle(s.title));
 }
 
-// Global shimmer clock: ticks only while some session is working, so idle UIs stay static.
-const shimmerTick = signal(0);
-let shimmerRunning = false;
+// Advance the status glyphs only while a session is working.
+const agentSpinnerTick = signal(0);
+let agentSpinnerRunning = false;
 
-function shimmerStep(): void {
+function agentSpinnerStep(): void {
   if (!sessionsState.value.items.some(sessionWorking)) {
-    shimmerRunning = false;
+    agentSpinnerRunning = false;
     return;
   }
-  shimmerTick.value = shimmerTick.value + 1;
-  afterView(70, shimmerStep);
+  agentSpinnerTick.value = agentSpinnerTick.value + 1;
+  afterView(agentListLayout.spinnerFrameMs, agentSpinnerStep);
 }
 
 effect(() => {
-  if (!shimmerRunning && sessionsState.value.items.some(sessionWorking)) {
-    shimmerRunning = true;
-    afterView(70, shimmerStep);
+  if (!agentSpinnerRunning && sessionsState.value.items.some(sessionWorking)) {
+    agentSpinnerRunning = true;
+    afterView(agentListLayout.spinnerFrameMs, agentSpinnerStep);
   }
 });
 
-// Single-line text that never ellipsizes: when it does not fit it scrolls back and forth
-// (marquee) and, while `shimmer` is on, a highlight band sweeps across it.
-function ShimmerText(props: {
+// Keep the intrinsic title in one text node and soften only the clipped edge.
+function FadeText(props: {
   text: Source<string>;
   font: Font;
-  color: () => number;
-  highlight?: () => number;
-  shimmer?: Source<boolean>;
-  marquee?: Source<boolean>;
-  grow?: boolean;
+  color?: Source<number>;
+  spans?: Source<Span[]>;
+  background: Source<number>;
+  layoutChanged?: () => void;
 }): Element {
-  const boxW = signal(0);
-  const textW = signal(0);
+  const layout = titleFadeLayout;
+  const color = props.color;
+  const bounds = signal({ width: 0, height: 0, overflow: false });
   let boxId: number | undefined;
   let textId: number | undefined;
+  let pending = false;
+  let layoutVersion = 0;
   const measure = () => {
     if (boxId === undefined || textId === undefined) return;
-    const bw = jsnir.columns.width[boxId] ?? 0;
-    const tw = jsnir.columns.width[textId] ?? 0;
-    if (bw !== boxW.value) boxW.value = bw;
-    if (tw !== textW.value) textW.value = tw;
+    const width = jsnir.columns.width[boxId] ?? 0;
+    const height = jsnir.columns.height[boxId] ?? 0;
+    const overflow = width > 0 && (jsnir.columns.width[textId] ?? 0) > width + spacing.hairline;
+    const previous = bounds.value;
+    if (width !== previous.width || height !== previous.height || overflow !== previous.overflow) {
+      bounds.value = { width, height, overflow };
+    }
+  };
+  const measureAfterLayout = () => {
+    if (pending) return;
+    pending = true;
+    afterView(layout.measureDelay, () => {
+      pending = false;
+      measure();
+    });
   };
   effect(() => {
     void read(props.text);
     void viewportSize.value;
     void sidebarCompact.value;
-    afterView(16, measure);
-    afterView(240, measure);
+    props.layoutChanged?.();
+    measureAfterLayout();
+    const version = ++layoutVersion;
+    afterView(SPRING_MS + layout.measureDelay, () => {
+      if (version === layoutVersion) measure();
+    });
   });
-  const overflow = () => Math.max(0, textW.value - boxW.value);
-  const spans = (): Span[] => {
-    const text = read(props.text);
-    if (!read(props.shimmer ?? false)) return [{ text, color: props.color() }];
-    const chars = Array.from(text);
-    const band = 5;
-    const period = chars.length + band * 4;
-    const pos = (shimmerTick.value % period) - band * 2;
-    const base = props.color();
-    const hl = props.highlight ? props.highlight() : palette().textPrimary;
-    // Plain runs on both sides of the band; only the band's characters get their own span.
-    const from = Math.max(0, Math.min(chars.length, Math.ceil(pos - band)));
-    const to = Math.max(from, Math.min(chars.length, Math.floor(pos + band) + 1));
-    const out: Span[] = [];
-    if (from > 0) out.push({ text: chars.slice(0, from).join(""), color: base });
-    for (let i = from; i < to; i++) {
-      out.push({ text: chars[i], color: mixColor(base, hl, Math.max(0, 1 - Math.abs(i - pos) / band)) });
-    }
-    if (to < chars.length) out.push({ text: chars.slice(to).join(""), color: base });
-    return out;
-  };
   return (
-    <Row
-      ref={(id) => {
-        boxId = id;
-        afterView(16, measure);
-      }}
-      style={{ grow: props.grow === false ? 0 : 1, shrink: 1, minWidth: 0, align: "center", clip: true }}
-    >
-      <Box
-        ref={(id) => {
-          textId = id;
-        }}
-        style={{ shrink: 0 }}
-        paint={() => {
-          const ov = overflow();
-          if (ov < 2 || !read(props.marquee ?? true)) return { x: 0 };
-          // Hold at both ends, glide at ~30px/s, two round trips; toggling `marquee` (hover) or a new
-          // title replays it, so long titles never keep the window repainting forever.
-          return {
-            animations: [
-              {
-                property: "x",
-                keyframes: [
-                  { offset: 0, value: 0 },
-                  { offset: 0.2, value: 0 },
-                  { offset: 0.8, value: -ov },
-                  { offset: 1, value: -ov },
-                ],
-                duration: Math.round(1800 + ov * 34),
-                easing: "easeInOut",
-                iterations: 4,
-                alternate: true,
-              },
-            ],
-          };
-        }}
-      >
-        <Text font={props.font} spans={spans}>
-          {props.text}
-        </Text>
+    <Row ref={(id) => { boxId = id; measureAfterLayout(); }}
+      style={{ grow: 1, shrink: 1, minWidth: 0, align: "center", clip: true }}>
+      <Box ref={(id) => { textId = id; }} style={{ shrink: 0 }}>
+        <Text font={props.font} spans={props.spans}
+          paint={color === undefined ? undefined : () => ({ color: read(color) })}>{props.text}</Text>
       </Box>
+      <Show when={() => bounds.value.overflow} style={() => {
+        const { width, height } = bounds.value;
+        const fadeWidth = Math.min(width, layout.width);
+        return { position: "absolute", left: width - fadeWidth, top: 0, width: fadeWidth, height };
+      }}>
+        {() => <Image source="ui:text-fade" style={{ grow: 1 }} paint={() => ({
+          color: read(props.background), a11y: { hidden: true },
+          transitions: [smoothTransition("color", motion.fast)],
+        })} />}
+      </Show>
     </Row>
   );
 }
-
 
 // ---- Image paths printed by any CLI: loaded on demand by the host for hover previews and the
 // image viewer. `loading` until the host answers, `error` when it could not be read/decoded.
@@ -2099,12 +2150,81 @@ const overviewIndex = signal<number | "addWorkspace">(0);
 // The workspace the overview closed onto, until the host has made it active.
 const overviewExitTarget = signal<number | null>(null);
 
+// Overview filter: words match window titles, folders and agents; `@status` tokens match the state
+// an agent reports. Windows that do not match only dim, so the tiling never moves.
+const overviewFilter = signal("");
+// True while the filter field is mounted (and so focused): typing goes to it.
+const overviewFiltering = signal(false);
+// Bumped to remount the field with a completed token (JSNIR fields only take an initial text).
+const overviewFilterRevision = signal(0);
+
+interface OverviewStatusFilter {
+  token: string;
+  detail: string;
+  match: (session: SessionItem) => boolean;
+}
+
+const OVERVIEW_STATUS_FILTERS: OverviewStatusFilter[] = [
+  { token: "@working", detail: "Busy, running or thinking", match: (s) => s.status === "working" },
+  { token: "@blocked", detail: "Needs attention or input", match: (s) => s.status === "blocked" },
+  { token: "@stopped", detail: "Finished, failed or exited",
+    match: (s) => s.status === "done" || s.status === "failed" || !s.alive },
+  { token: "@idle", detail: "Waiting for a command", match: (s) => s.alive && (s.status ?? "idle") === "idle" },
+  { token: "@ai", detail: "Agent sessions (Claude, Codex…)", match: (s) => s.cli !== "terminal" },
+];
+
+function overviewFilterWords(filter: string): string[] {
+  return filter.trim().toLowerCase().split(/\s+/).filter((word) => word.length > 0);
+}
+
+function overviewMatches(id: number, filter = overviewFilter.value): boolean {
+  const words = overviewFilterWords(filter);
+  if (words.length === 0) return true;
+  const session = sessionsState.value.items.find((s) => s.id === id);
+  const spec = session ? undefined : tileOf(id);
+  const text = session ? [cleanTitle(session.title), session.cli, session.cwd]
+    : spec ? [tileTitle(spec, id), spec.kind, spec.path, spec.cwd ?? ""] : [];
+  return words.every((word) => {
+    if (!word.startsWith("@")) return text.join(" ").toLowerCase().includes(word);
+    // A token still being typed ("@wo") matches every status it could become.
+    return !!session && OVERVIEW_STATUS_FILTERS.some((f) => f.token.startsWith(word) && f.match(session));
+  });
+}
+
+// Status tokens the last word of the filter could complete to.
+function overviewSuggestions(): OverviewStatusFilter[] {
+  const last = overviewFilter.value.endsWith(" ") ? "" : overviewFilterWords(overviewFilter.value).pop() ?? "";
+  if (!last.startsWith("@")) return [];
+  return OVERVIEW_STATUS_FILTERS.filter((f) => f.token.startsWith(last) && f.token !== last);
+}
+
+// The keyboard selection follows the filter to the first window that still matches.
+function setOverviewFilter(text: string): void {
+  overviewFilter.value = text;
+  const selection = overviewIndex.value;
+  if (typeof selection === "number" && overviewMatches(selection, text)) return;
+  const first = allWindowIds().find((id) => overviewMatches(id, text));
+  if (first !== undefined) overviewIndex.value = first;
+}
+
+function completeOverviewFilter(token = overviewSuggestions()[0]?.token): void {
+  if (!token) return;
+  setOverviewFilter(overviewFilter.value.replace(/\S*$/, token + " "));
+  overviewFilterRevision.value++;
+}
+
+function resetOverviewFilter(): void {
+  overviewFilter.value = "";
+  overviewFiltering.value = false;
+}
+
 function setViewMode(mode: ViewMode): void {
   activeNav.value = "agents";
   if (mode === "overview") {
     if (overviewOpen2.value) return;
     overviewIndex.value = tilingState.value.focusedSession;
     overviewExitTarget.value = null;
+    resetOverviewFilter();
     overviewOpen2.value = true;
     requestHost({ type: "overview", on: true });
     return;
@@ -2122,6 +2242,7 @@ function toggleOverviewMode(): void {
 function closeOverviewMode(workspace = tilingState.value.activeWorkspace): void {
   if (!overviewOpen2.value) return;
   overviewExitTarget.value = workspace;
+  resetOverviewFilter();
   overviewOpen2.value = false;
   requestHost({ type: "overview", on: false });
 }
@@ -2142,10 +2263,27 @@ function handleOverviewKey(action: string): void {
   if (!overviewOpen2.value) return;
   const selection = overviewIndex.value;
   if (action === "escape") {
-    closeOverviewMode();
+    // Esc first drops the filter, then leaves the overview.
+    if (overviewFiltering.value || overviewFilter.value) resetOverviewFilter();
+    else closeOverviewMode();
+    return;
+  }
+  if (action === "filter") {
+    overviewFiltering.value = true;
+    return;
+  }
+  if (action === "tab") {
+    completeOverviewFilter();
+    return;
+  }
+  const digit = /^workspace:([1-9])$/.exec(action);
+  if (digit) {
+    const index = Number(digit[1]) - 1;
+    if (index < workspaceList().length) openWorkspaceFromOverview(index);
     return;
   }
   if (action === "enter") {
+    if (typeof selection === "number" && !overviewMatches(selection)) return;
     if (selection === "addWorkspace") openWorkspaceFromOverview(workspaceList().length - 1);
     else pickFromOverview(selection);
     return;
@@ -2162,13 +2300,14 @@ function handleOverviewKey(action: string): void {
   if (action === "left" || action === "right") {
     const target = columns[col + (action === "left" ? -1 : 1)];
     next = target?.panes[Math.min(pane, target.panes.length - 1)];
-  } else if (action === "up" || action === "down") {
-    const step = action === "up" ? -1 : 1;
-    if (action === "down" && index === workspaces.length - 1 && !workspaces[index].panes.length) {
+  } else if (action === "up" || action === "down" || action === "workspaceUp" || action === "workspaceDown") {
+    const step = action === "up" || action === "workspaceUp" ? -1 : 1;
+    if (step > 0 && index === workspaces.length - 1 && !workspaces[index].panes.length) {
       overviewIndex.value = "addWorkspace";
       return;
     }
-    next = columns[col]?.panes[pane + step];
+    // The wheel moves a whole workspace (niri); arrows first walk the panes of the column.
+    next = action.startsWith("workspace") ? undefined : columns[col]?.panes[pane + step];
     if (next === undefined) {
       for (let i = index + step; i >= 0 && i < workspaces.length; i += step) {
         if (workspaces[i].panes.length) {

@@ -74,42 +74,6 @@ function ReleaseNotesMenuItem(props: { label: string; onPress: () => void }): El
   />;
 }
 
-const releaseNotesAscii = [
-  "                   .                   .",
-  "       .                    *",
-  "                 .          |           +",
-  "                       +  . |.    .",
-  "            .           + .+|+.  +",
-  "                  .      +\\ | /+        .",
-  "            *----+----+---..+..---+----*",
-  "                      +  +/ | \\+    .",
-  "                  .  +  . +.|.+ .",
-  "        .                   |    +",
-  "                      .     *        .",
-  "              .                  .",
-];
-
-function ReleaseCoverAscii(props: { width: () => number; height: () => number }): Element {
-  const layout = releaseNotesLayout;
-  return (
-    <For each={releaseNotesAscii} key={(line) => line}
-      style={() => ({
-        position: "absolute", left: (props.width() - layout.asciiWidth) / 2,
-        top: (props.height() - releaseNotesAscii.length * layout.asciiRowHeight) / 2,
-        width: layout.asciiWidth,
-      })}
-      paint={{ a11y: { hidden: true } }}
-    >
-      {(line) => (
-        <Text lines={1} style={{ height: layout.asciiRowHeight, shrink: 0 }}
-          font={{ family: fontFamilies.mono, size: layout.asciiFontSize, lineHeight: 1 }}
-          paint={() => ({ color: withAlpha(accent().brandText, themeMode.value === "dark"
-            ? layout.asciiDarkAlpha : layout.asciiLightAlpha) })}>{line}</Text>
-      )}
-    </For>
-  );
-}
-
 function ReleaseCoverImage(props: { image: () => FileImageEntry | undefined; width: () => number; height: () => number }): Element {
   return (
     <Box style={() => {
@@ -189,8 +153,8 @@ function ReleaseNotesCover(props: {
     <Box style={() => ({ height: props.height(), minWidth: 0, shrink: 0, clip: true })}
       paint={() => ({
         gradient: [
-          mixColor(palette().panelBg, accent().brand, layout.coverAccentTop),
-          mixColor(palette().panelBg, accent().brand, layout.coverAccentBottom),
+          mixColor(palette().panelBg, accent().brand, layout.coverAccentMix),
+          palette().panelBg,
         ],
       })}
     >
@@ -217,8 +181,18 @@ function ReleaseNotesCover(props: {
                   <Show when={() => !!image()} style={{ position: "absolute", left: 0, top: 0 }}>
                     {() => <ReleaseCoverImage image={image} width={props.width} height={props.height} />}
                   </Show>
-                  <Show when={() => !url} style={{ position: "absolute", left: 0, top: 0 }}>
-                    {() => <ReleaseCoverAscii width={props.width} height={props.height} />}
+                  <Show when={() => !image()} style={{ position: "absolute", left: 0, top: 0,
+                    width: props.width(), height: props.height() }}>
+                    {() => <Box style={{ grow: 1 }} paint={() => ({
+                      // Dots clip to this radius, not the dialog's, so match its top corners.
+                      radius: [radii.xxl, radii.xxl, 0, 0],
+                      mask: workspacePixelBlast.releaseMask,
+                      gradient: [
+                        withAlpha(palette().textMuted, workspacePixelBlast.baseOpacity),
+                        withAlpha(accent().brandText, workspacePixelBlast.accentOpacity),
+                      ],
+                      a11y: { hidden: true },
+                    })} />}
                   </Show>
                   <Show when={video}>
                     {() => (

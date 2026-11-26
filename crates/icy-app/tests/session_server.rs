@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -95,6 +96,9 @@ fn terminal_server_keeps_working_without_a_window_and_reattaches() {
     layout.open_pane(2, false);
     assert!(layout.focus_workspace(0));
     layout.toggle_maximize();
+    let archive = BTreeMap::from([(1, 123)]);
+    client.save_archive(&archive).unwrap();
+    layout.remove_session(1);
     client.save_layout(&layout).unwrap();
 
     drop(terminal);
@@ -108,6 +112,7 @@ fn terminal_server_keeps_working_without_a_window_and_reattaches() {
 
     let (client, reopened) = Client::attach(&dir, app, || {}, || {}).unwrap();
     assert_eq!(reopened.layout.unwrap().snapshot(), layout.snapshot());
+    assert_eq!(client.load_archive().unwrap(), archive);
     let mut terminals = reopened.terminals.into_iter();
     let running = client.terminal(terminals.next().unwrap());
     let previous = client.terminal(terminals.next().unwrap());
@@ -118,6 +123,7 @@ fn terminal_server_keeps_working_without_a_window_and_reattaches() {
         "screen history was lost"
     );
 
+    client.save_archive(&BTreeMap::new()).unwrap();
     running.write_input(b"reply\r").unwrap();
     wait_for(
         || screen_contains(&running, "CONTINUED: reply"),
@@ -135,6 +141,7 @@ fn terminal_server_keeps_working_without_a_window_and_reattaches() {
         "an explicitly closed terminal reappeared"
     );
     assert!(reopened.layout.unwrap().all_panes().is_empty());
+    assert!(client.load_archive().unwrap().is_empty());
     drop(client);
 }
 

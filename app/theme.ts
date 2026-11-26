@@ -15,7 +15,6 @@ interface ThemePalette {
   sidebarActive: number;
   sendIdle: number;
   highlight: number;
-  selection: number;
   destructive: number;
   ring: number;
   statusOnline: number;
@@ -110,7 +109,6 @@ const darkPalette: ThemePalette = {
   sidebarActive: 0x1f1f22ff,
   sendIdle: 0x3f3f46ff,
   highlight: 0x3b82f6ff,
-  selection: 0x4678dc6e,
   destructive: 0xf87171ff,
   ring: 0x52525bff,
   statusOnline: 0x4ade80ff,
@@ -162,7 +160,6 @@ const lightPalette: ThemePalette = {
   sidebarActive: 0xf0f0f1ff,
   sendIdle: 0x8e8e93ff,
   highlight: 0x2563ebff,
-  selection: 0x2563eb33,
   destructive: 0xef4444ff,
   ring: 0xa1a1aaff,
   statusOnline: 0x16a34aff,
@@ -351,48 +348,24 @@ const spacing = {
   panelWidth: 300,
   codePanelMin: 520,
   headerHeight: 44,
-  paneGap: 8,
+  // niri `gaps 16`: between windows and around them, also for a lone maximized column.
+  paneGap: 16,
 };
 
-const projectDialogLayout = {
-  width: 508,
-  height: 490,
-  padding: spacing.unit * 4,
-  narrowPadding: spacing.unit * 2,
-  narrowAt: 420,
-  gap: spacing.unit * 2,
-  icon: 16,
-  sectionsWidth: 164,
-  layer: 2200,
-};
-
-// "New session" launcher in two steps: a folder tree with Nautilus-style places, then the agent.
-const sessionLauncherLayout = {
-  width: 780,
-  height: 540,
-  stepsHeight: 46,
-  stepDot: 18,
+// Folder view inside the launcher, with Nautilus-style places.
+const launcherFolderLayout = {
   placesWidth: 196,
+  compactAt: 540,
   placeHeight: 30,
   // Tree level width: the guide runs under the parent's icon (see LauncherTreeGuide).
   indent: 20,
   // Deepest ancestors kept above the current folder.
   treeDepth: 6,
-  inputHeight: 50,
-  inputPadding: [0, spacing.unit * 4, 0, spacing.unit * 4] as [number, number, number, number],
   listInset: spacing.unit * 2,
-  sectionHeight: 28,
-  sectionPadding: [0, spacing.unit * 3, 0, spacing.unit * 3] as [number, number, number, number],
   rowHeight: 34,
   rowPadding: [0, spacing.unit * 3, 0, spacing.unit * 3] as [number, number, number, number],
-  barPadding: [spacing.unit * 2.5, spacing.unit * 4, spacing.unit * 2.5, spacing.unit * 4] as [number, number, number, number],
-  chipHeight: 28,
-  chipPadding: [0, spacing.unit * 2.5, 0, spacing.unit * 2] as [number, number, number, number],
-  actionHeight: 30,
   gap: spacing.unit * 2,
   icon: 15,
-  logo: 14,
-  screenMargin: spacing.unit * 4,
 };
 
 const quietControlLayout = {
@@ -407,6 +380,24 @@ const iconButtonLayout = {
   md: { size: spacing.button, icon: 16 },
 };
 
+const titleFadeLayout = {
+  width: spacing.unit * 4,
+  measureDelay: 16,
+};
+
+const tooltipLayout = {
+  height: 26,
+  padding: spacing.unit * 2,
+  headerGap: spacing.unit * 1.5,
+  keyGap: 3,
+  keySize: 18,
+  caretSize: 10,
+  caretOverlap: spacing.hairline * 2,
+  anchorGap: spacing.unit,
+  delay: 250,
+  layer: 1000,
+};
+
 // Accordee control states (verified in the served CSS): `hover:opacity-90`, `disabled:opacity-40`,
 // `active:scale-[0.98]` on labelled buttons and `active:scale-95` on icon-only buttons.
 const controlState = {
@@ -416,6 +407,10 @@ const controlState = {
   iconPressScale: 0.95,
   // `hover:border-textMuted/40` = color-mix(in oklab, var(--ac-text-muted) 40%, transparent).
   hoverBorderMix: 0.4,
+  // Floating-chrome rows: the selected one gets a half-strength accent line, a hovered one a faint
+  // line, so a selected row next to a hovered one never reads as two equal boxes.
+  selectedLineMix: 0.5,
+  hoverLineMix: 0.18,
   // Row hover wash: `bg-textPrimary/5`, lighter than `kbdBg` so keycaps stay visible on it.
   rowHoverMix: 0.05,
 };
@@ -433,6 +428,22 @@ function mixColor(a: number, b: number, t: number): number {
 
 function hoverBorder(): number {
   return withAlpha(palette().textMuted, controlState.hoverBorderMix);
+}
+
+// The one surface of the floating chrome (`floatingLayout`): search bars, results panels,
+// suggestions and pills.
+function floatingSurface(): Paint {
+  return { radius: radii.lg, background: withAlpha(palette().cardBg, floatingLayout.surfaceAlpha),
+    backdropBlur: floatingLayout.surfaceBlur, backdropSaturation: floatingLayout.saturation,
+    edge: palette().border, edgeWidth: spacing.hairline, shadows: [shadows.card] };
+}
+
+// A selectable row inside the floating chrome: selection and hover are a line, never a fill.
+function selectableRowPaint(selected: boolean): Paint {
+  const line = withAlpha(accent().brand, controlState.selectedLineMix);
+  // Rows sit `spacing.unit * 2` inside a `radii.lg` panel: a smaller radius keeps the curves concentric.
+  return { radius: radii.md, edge: selected ? line : 0, edgeWidth: spacing.hairline,
+    hover: { edge: selected ? line : withAlpha(palette().textMuted, controlState.hoverLineMix) } };
 }
 
 function rowHoverBackground(): number {
@@ -453,11 +464,9 @@ const agentListLayout = {
   icon: 16,
   statusSize: 14,
   dot: 7,
-  badge: 16,
-  flashDuration: 3000,
-  holdDelay: 180,
   // Rotated frames of the working spinner rasterized by the host (icons.rs SPINNER_FRAMES).
   spinnerFrames: 12,
+  spinnerFrameMs: 70,
 };
 
 const emptyStateLayout = {
@@ -470,21 +479,14 @@ const emptyStateLayout = {
 const emptyWorkspaceLayout = {
   contentWidth: 280,
   shortcutMinWidth: 248,
-  asciiCellW: typeScale.caption * 0.6 * 2,
-  asciiCellH: spacing.unit * 4,
-  asciiBaseAlphaDark: 0.12,
-  asciiBaseAlphaLight: 0.13,
-  asciiAccentAlphaDark: 0.24,
-  asciiAccentAlphaLight: 0.24,
-  // Motion: ~12 fps is enough for a character grid and keeps the redraw cheap.
-  asciiFrameMs: 80,
-  asciiDrift: 0.9,
-  asciiPointerRadius: spacing.unit * 36,
-  asciiPointerEase: 0.25,
-  // Seconds after the last pointer move before its ripple fades out.
-  asciiPointerIdle: 1.6,
-  asciiRippleScale: 0.07,
-  asciiRippleSpeed: 5,
+};
+
+const workspacePixelBlast = {
+  mask: "workspace:pixel-blast",
+  pausedMask: "workspace:pixel-blast-paused",
+  releaseMask: "release:pixel-blast",
+  baseOpacity: 0.32,
+  accentOpacity: 0.57,
 };
 
 const workspaceTiling = {
@@ -508,6 +510,7 @@ const workspaceTiling = {
 };
 
 const workspaceTabLayout = {
+  layer: 2,
   // Outline geometry matches assets/icons/workspace-tab-outline.svg.
   height: spacing.headerHeight - spacing.unit * 1.5,
   overhang: spacing.unit * 2.5,
@@ -596,9 +599,10 @@ function terminalSelectionBg(): number {
   return ((palette().highlight & 0xffffff00) | 0x59) >>> 0;
 }
 
-// Archived window: a centred list of closed sessions.
+// Archived window and its centred empty state.
 const archivedLayout = {
   maxWidth: 720,
+  emptyWidth: 320,
   padding: spacing.unit * 5,
   headerGap: spacing.unit * 4,
   rowPadding: [spacing.unit * 2, spacing.unit * 3, spacing.unit * 2, spacing.unit * 3] as [number, number, number, number],
@@ -655,7 +659,6 @@ const editorLayout = {
   scrollbarWidth: 8,
   scrollbarInset: 2,
   scrollbarMinThumb: 24,
-  toolbarHeight: 32,
   sessionListHeight: 280,
   sampleScale: 2,
   sampleBackground: 0x20242cff,
@@ -671,6 +674,7 @@ const editorLayout = {
   chipPadding: [0, spacing.unit * 2, 0, spacing.unit * 2] as [number, number, number, number],
   chipLayer: 1,
   caretPollMs: 150,
+  doubleClickMs: 400,
   blameDelay: 400,
 };
 
@@ -706,25 +710,87 @@ const codePreviewLayout = {
   hoverDelay: 220,
   // Grace before closing when the pointer leaves a link span (it may enter the link's next span).
   leaveDelay: 80,
-  layer: 1000,
+  // Keep terminal previews below the workspace tab bar and above inline terminal content.
+  layer: 1,
   maxCache: 24,
   revalidateMs: 1500,
 };
 
-const searchDialogLayout = {
+const launcherLayout = {
   width: 700,
   height: 576,
   margin: spacing.unit * 3,
   gutter: spacing.unit * 4,
   rowInset: spacing.unit * 2,
-  headerHeight: spacing.unit * 14,
   footerHeight: spacing.toolbar,
   headingHeight: spacing.control,
   rowHeight: spacing.toolbar,
   rowGap: spacing.unit,
+  sectionGap: spacing.unit * 2,
+  recentGap: spacing.unit * 2,
+  recentHeight: spacing.toolbar + spacing.unit,
+  recentCardMin: 180,
+  recentColumns: 3,
+  recentLimit: 6,
+  narrowHintsAt: 520,
   scrollGutter: editorLayout.scrollbarWidth + editorLayout.scrollbarInset + spacing.unit,
   icon: 16,
-  layer: projectDialogLayout.layer - 10,
+  layer: 2200,
+};
+
+// Floating chrome: every modal and the overview float the same separate pieces over the workspace
+// (a search bar at a fixed height, a results panel sized to its content, hints at the bottom of the
+// window) instead of one large fixed card. Selection and hover are drawn with line borders.
+const floatingLayout = {
+  searchHeight: spacing.toolbar,
+  // Where the search bar sits, as a fraction of the window height (never closer than `minTop`).
+  topFraction: 0.14,
+  minTop: spacing.unit * 6,
+  gap: spacing.unit * 2,
+  // Smallest results panel: an empty state on one line.
+  emptyHeight: spacing.toolbar + spacing.unit * 4,
+  hintsHeight: spacing.control,
+  hintsBottom: spacing.unit * 4,
+  icon: 16,
+  // JSNIR `paint.backdropBlur` (dual Kawase, niri's non-xray blur): the modal backdrop blurs the
+  // whole workspace; each floating surface blurs what is under it, tinted by a translucent `cardBg`.
+  backdropBlur: 24,
+  surfaceBlur: 16,
+  saturation: 1.4,
+  surfaceAlpha: 0.72,
+};
+
+// Workspace switcher: a wheel whose selected row stays at the vertical centre while the list
+// slides under it; rows dim and shrink with their distance from the centre.
+const workspaceSwitcherLayout = {
+  width: 520,
+  rowHeight: spacing.controlLg + spacing.unit * 2,
+  rowGap: spacing.unit,
+  // Rows beyond this distance from the centre are not drawn.
+  visibleRows: 4,
+  opacityStep: 0.28,
+  scaleStep: 0.06,
+  minScale: 0.82,
+};
+
+// "Workspace 2 / 6 · name" pill shown at the bottom after a workspace switch.
+const workspacePillLayout = {
+  height: spacing.control,
+  bottom: spacing.unit * 4,
+  dot: spacing.unit * 1.5,
+  holdMs: 1200,
+  layer: 2100,
+};
+
+// Overview filter bar and the per-workspace labels in the gap above each workspace.
+const overviewFilterLayout = {
+  width: 460,
+  top: spacing.unit * 3,
+  suggestionWidth: 300,
+  labelHeight: spacing.unit * 5,
+  // Windows that do not match the filter stay in place, dimmed.
+  dimOpacity: 0.22,
+  layer: 40,
 };
 
 const treeLayout = {
@@ -917,19 +983,13 @@ const releaseNotesLayout = {
   icon: 16,
   coverRatio: 1.85,
   coverHeightFraction: 0.42,
-  coverAccentTop: 0.3,
-  coverAccentBottom: 0.11,
+  coverAccentMix: 0.12,
   coverCloseInset: spacing.unit * 3,
   coverPlaySize: spacing.unit * 13,
   coverPlayIcon: 20,
   coverPlayHoverScale: 1.05,
   coverTitleSize: typeScale.heading,
   compactAt: 420,
-  asciiWidth: 310,
-  asciiRowHeight: 13,
-  asciiFontSize: typeScale.caption,
-  asciiDarkAlpha: 0.6,
-  asciiLightAlpha: 0.45,
   bulletSize: spacing.unit,
   bulletTop: spacing.unit * 2,
   mediaIconSize: spacing.button,
@@ -1104,10 +1164,16 @@ function palette(): ThemePalette {
     textMuted: custom.colors.textMuted,
     border: custom.colors.border,
     highlight: custom.colors.highlight,
-    selection: custom.colors.selection ?? withAlpha(custom.colors.highlight, editorLayout.selectionMix),
     charts: custom.colors.charts,
     graphLanes: custom.colors.graph?.length ? custom.colors.graph : base.graphLanes,
   };
+}
+
+// Text selection: the theme's own color when it sets one, otherwise the accent, so it follows
+// the accent picker like every other highlight.
+function selectionFill(): number {
+  const custom = themesList.value.find((t) => t.id === activeThemeId.value)?.colors.selection;
+  return custom ?? withAlpha(accent().brand, editorLayout.selectionMix);
 }
 
 function accent(): AccentPalette {

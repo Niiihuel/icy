@@ -178,8 +178,11 @@ impl PumpSchedule {
         }
     }
 
+    /// After a pump the next one is the safety pump: CEF does not schedule all of its work (a
+    /// navigation stalls without it), so cefclient also pumps at least every 33 ms.
     fn clear(&self) {
-        self.due_ms.store(NO_PUMP_WORK, Ordering::Release);
+        let fallback = self.elapsed_ms(Instant::now()) + MAX_FALLBACK_PUMP_MS as i64;
+        self.due_ms.store(fallback, Ordering::Release);
         self.notified.store(false, Ordering::Release);
     }
 
@@ -233,7 +236,8 @@ struct Pixels {
 /// State a browser's CEF handlers write to. Handlers hold it through `Rc`; it never holds CEF
 /// objects, so dropping a view does not leak the browser.
 struct ViewInner {
-    /// Logical DIP size reported to CEF via `view_rect` / `screen_info`.
+    /// Size in device pixels reported to CEF via `view_rect` / `screen_info` (see
+    /// `view_and_phys_for_rect`).
     size: Cell<[i32; 2]>,
     /// Exact target physical pixels of the body node so `jsnir-gpu`'s `one_to_one` draws 1:1.
     target_phys: Cell<Option<[u32; 2]>>,
@@ -244,6 +248,10 @@ struct ViewInner {
     any_frame_dirty: Rc<Cell<bool>>,
     pusher: Pusher,
     open_count: Rc<Cell<usize>>,
+    /// The pane has the app's focus. CEF drops `set_focus` before its OSR view exists, so the
+    /// first paint applies it again.
+    wants_focus: Cell<bool>,
+    painted: Cell<bool>,
 }
 
 impl ViewInner {
@@ -282,29 +290,34 @@ impl ViewInner {
             crop_rgba(&pixels.view, [vw, vh], [ow, oh])
         };
         if let (Some(rect), Some((popup, popup_size))) = (pixels.popup_rect, &pixels.popup) {
-            blend_popup(
-                &mut rgba,
-                [ow, oh],
-                rect,
-                popup,
-                *popup_size,
-                self.scale.get(),
-            );
+            blend_popup(&mut rgba, [ow, oh], rect, popup, *popup_size);
         }
         Some((rgba, [ow, oh]))
     }
 }
 
-/// Computes the CEF DIP dimensions and exact target physical pixels for a logical layout rect.
-/// DIPs use `ceil(phys / scale)` so CEF renders at least `target_phys` physical pixels even on
-/// fractional DPI (`1.25x`, `1.5x`, `1.75x`).
-fn dip_and_phys_for_rect(logical_w: f32, logical_h: f32, scale: f32) -> ([i32; 2], [u32; 2]) {
+/// The view size CEF lays out in and the exact target physical pixels for a logical layout rect.
+/// Both are device pixels: CEF's Linux OSR ignores `ScreenInfo::device_scale_factor` and paints
+/// at 1x, so the page gets a 1x screen of device pixels and `page_zoom` restores CSS sizes.
+fn view_and_phys_for_rect(logical_w: f32, logical_h: f32, scale: f32) -> ([i32; 2], [u32; 2]) {
     let scale = scale.max(0.5);
     let phys_w = (logical_w * scale).round().max(1.0) as u32;
     let phys_h = (logical_h * scale).round().max(1.0) as u32;
-    let dip_w = ((phys_w as f32 / scale).ceil() as i32).max(1);
-    let dip_h = ((phys_h as f32 / scale).ceil() as i32).max(1);
-    ([dip_w, dip_h], [phys_w, phys_h])
+    ([phys_w as i32, phys_h as i32], [phys_w, phys_h])
+}
+
+/// CEF's zoom level (`1.2^level` is the page zoom) that makes one CSS pixel `scale` device pixels,
+/// as Chromium's zoom-for-DSF does, so `devicePixelRatio`, media queries and `srcset` match.
+fn page_zoom(scale: f32) -> f64 {
+    f64::from(scale.max(0.5)).ln() / 1.2f64.ln()
+}
+
+/// Zoom is per host in Chromium, so a page on a new site starts at 100% until this runs again.
+fn apply_page_zoom(host: &BrowserHost, scale: f32) {
+    let level = page_zoom(scale);
+    if (host.zoom_level() - level).abs() > 1e-6 {
+        host.set_zoom_level(level);
+    }
 }
 
 fn crop_rgba(src: &[u8], src_size: [u32; 2], dst_size: [u32; 2]) -> Vec<u8> {
@@ -319,19 +332,17 @@ fn crop_rgba(src: &[u8], src_size: [u32; 2], dst_size: [u32; 2]) -> Vec<u8> {
     out
 }
 
-/// Copies a popup over the view at its logical rectangle, clipped to the view.
+/// Copies a popup over the view at its rectangle (view pixels), clipped to the view.
 fn blend_popup(
     view: &mut [u8],
     view_size: [u32; 2],
     rect: [i32; 4],
     popup: &[u8],
     popup_size: [u32; 2],
-    scale: f32,
 ) {
     let [vw, vh] = view_size.map(i64::from);
     let [pw, ph] = popup_size.map(i64::from);
-    let ox = (rect[0] as f32 * scale).round() as i64;
-    let oy = (rect[1] as f32 * scale).round() as i64;
+    let [ox, oy] = [rect[0], rect[1]].map(i64::from);
     let cols = (0.max(-ox))..pw.min(vw - ox).max(0);
     if cols.is_empty() {
         return;
@@ -513,7 +524,7 @@ impl Browsers {
             if w <= 0.0 || h <= 0.0 {
                 continue;
             }
-            let (dip, target_phys) = dip_and_phys_for_rect(w, h, scale);
+            let (view_size, target_phys) = view_and_phys_for_rect(w, h, scale);
             if view.inner.target_phys.get() == Some(target_phys) {
                 view.pending_phys = None;
                 continue;
@@ -522,7 +533,7 @@ impl Browsers {
             if settled || now.duration_since(view.last_resize) >= LIVE_RESIZE_INTERVAL {
                 view.pending_phys = None;
                 view.last_resize = now;
-                view.inner.size.set(dip);
+                view.inner.size.set(view_size);
                 view.inner.target_phys.set(Some(target_phys));
                 if let Some(browser_host) = view.browser.host() {
                     browser_host.was_resized();
@@ -566,8 +577,9 @@ impl Browsers {
             Command::Resize { id, size } => {
                 if let Some(view) = self.views.get(&id) {
                     let scale = self.scale.get().max(0.5);
-                    let (dip, phys) = dip_and_phys_for_rect(size[0] as f32, size[1] as f32, scale);
-                    view.inner.size.set(dip);
+                    let (view_size, phys) =
+                        view_and_phys_for_rect(size[0] as f32, size[1] as f32, scale);
+                    view.inner.size.set(view_size);
                     view.inner.target_phys.set(Some(phys));
                     if let Some(host) = view.browser.host() {
                         host.was_resized();
@@ -581,6 +593,7 @@ impl Browsers {
             }
             Command::Focus(id) => {
                 for (&view_id, view) in &self.views {
+                    view.inner.wants_focus.set(view_id == id);
                     if let Some(host) = view.browser.host() {
                         host.set_focus((view_id == id) as _);
                     }
@@ -598,9 +611,9 @@ impl Browsers {
 
     fn open(&mut self, id: u64, url: &str, size: [i32; 2], node: Option<u16>) {
         let scale = self.scale.get().max(0.5);
-        let (dip, target_phys) = if size[0] > 0 && size[1] > 0 {
-            let (dip, phys) = dip_and_phys_for_rect(size[0] as f32, size[1] as f32, scale);
-            (dip, Some(phys))
+        let (view_size, target_phys) = if size[0] > 0 && size[1] > 0 {
+            let (view_size, phys) = view_and_phys_for_rect(size[0] as f32, size[1] as f32, scale);
+            (view_size, Some(phys))
         } else {
             (size, None)
         };
@@ -608,7 +621,7 @@ impl Browsers {
             if node.is_some() {
                 view.node = node;
             }
-            view.inner.size.set(dip);
+            view.inner.size.set(view_size);
             view.inner.target_phys.set(target_phys);
             if let Some(host) = view.browser.host() {
                 host.was_hidden(0);
@@ -622,7 +635,7 @@ impl Browsers {
             return;
         }
         let inner = Rc::new(ViewInner {
-            size: Cell::new(dip),
+            size: Cell::new(view_size),
             target_phys: Cell::new(target_phys),
             scale: self.scale.clone(),
             state: RefCell::new(BrowserState {
@@ -636,6 +649,8 @@ impl Browsers {
             any_frame_dirty: self.any_frame_dirty.clone(),
             pusher: self.pusher.clone(),
             open_count: self.open_count.clone(),
+            wants_focus: Cell::new(false),
+            painted: Cell::new(false),
         });
         let window_info = WindowInfo {
             windowless_rendering_enabled: 1,
@@ -710,7 +725,7 @@ impl Browsers {
             view.inner.target_phys.set(None);
             view.pending_phys = None;
             if let Some(host) = view.browser.host() {
-                host.notify_screen_info_changed();
+                apply_page_zoom(&host, scale);
                 host.was_resized();
             }
         }
@@ -733,22 +748,38 @@ impl Browsers {
     /// `point` is in logical pixels of the browser's view; `mods` comes from `cef_modifiers`.
     pub fn mouse_move(&self, id: u64, point: [f32; 2], mods: u32, leave: bool) {
         if let Some(host) = self.host(id) {
-            let event = mouse_event(point, mods);
+            let event = self.mouse_event(point, mods);
             host.send_mouse_move_event(Some(&event), leave as _);
         }
     }
 
     pub fn mouse_click(&self, id: u64, point: [f32; 2], mods: u32, up: bool, clicks: i32) {
         if let Some(host) = self.host(id) {
-            let event = mouse_event(point, mods);
+            let event = self.mouse_event(point, mods);
+            if !up {
+                // A press on the page is a focus-in, as in cefclient's OSR windows.
+                host.set_focus(1);
+            }
             host.send_mouse_click_event(Some(&event), MouseButtonType::LEFT, up as _, clicks);
         }
     }
 
+    /// `dx`/`dy` are logical pixels, like `point`.
     pub fn wheel(&self, id: u64, point: [f32; 2], mods: u32, dx: i32, dy: i32) {
         if let Some(host) = self.host(id) {
-            let event = mouse_event(point, mods);
+            let event = self.mouse_event(point, mods);
+            let [dx, dy] = [dx, dy].map(|d| (d as f32 * self.scale.get().max(0.5)).round() as i32);
             host.send_mouse_wheel_event(Some(&event), dx, dy);
+        }
+    }
+
+    /// A pointer event in the view's device pixels.
+    fn mouse_event(&self, [x, y]: [f32; 2], modifiers: u32) -> cef::MouseEvent {
+        let scale = self.scale.get().max(0.5);
+        cef::MouseEvent {
+            x: (x * scale).round() as i32,
+            y: (y * scale).round() as i32,
+            modifiers,
         }
     }
 
@@ -808,14 +839,6 @@ impl Browsers {
         self.views.clear();
         shutdown();
         self.engine = Engine::Failed("Browser engine stopped".into());
-    }
-}
-
-fn mouse_event(point: [f32; 2], modifiers: u32) -> cef::MouseEvent {
-    cef::MouseEvent {
-        x: point[0] as i32,
-        y: point[1] as i32,
-        modifiers,
     }
 }
 
@@ -1014,12 +1037,12 @@ wrap_render_handler! {
             screen_x: Option<&mut ::std::os::raw::c_int>,
             screen_y: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
-            let scale = self.inner.scale.get().max(0.5);
+            // The view is in device pixels on a 1x screen, so view and screen pixels match.
             if let Some(sx) = screen_x {
-                *sx = (view_x as f32 * scale).round() as i32;
+                *sx = view_x;
             }
             if let Some(sy) = screen_y {
-                *sy = (view_y as f32 * scale).round() as i32;
+                *sy = view_y;
             }
             1
         }
@@ -1031,7 +1054,8 @@ wrap_render_handler! {
         ) -> ::std::os::raw::c_int {
             let Some(info) = screen_info else { return 0 };
             let [width, height] = view_size(&self.inner);
-            info.device_scale_factor = self.inner.scale.get().max(0.5);
+            // 1x: the HiDPI scale is the page zoom (see `view_and_phys_for_rect`).
+            info.device_scale_factor = 1.0;
             info.depth = 24;
             info.depth_per_component = 8;
             info.is_monochrome = 0;
@@ -1059,7 +1083,7 @@ wrap_render_handler! {
 
         fn on_paint(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             type_: PaintElementType,
             dirty_rects: Option<&[Rect]>,
             buffer: *const u8,
@@ -1068,6 +1092,12 @@ wrap_render_handler! {
         ) {
             if buffer.is_null() || width <= 0 || height <= 0 {
                 return;
+            }
+            if !self.inner.painted.replace(true)
+                && self.inner.wants_focus.get()
+                && let Some(host) = browser.and_then(|b| b.host())
+            {
+                host.set_focus(1);
             }
             let len = width as usize * height as usize * 4;
             // SAFETY: CEF passes a width * height * 4 BGRA buffer, valid only for this call.
@@ -1106,11 +1136,14 @@ wrap_display_handler! {
     impl DisplayHandler {
         fn on_address_change(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             frame: Option<&mut Frame>,
             url: Option<&CefString>,
         ) {
             if frame.is_some_and(|frame| frame.is_main() == 1) {
+                if let Some(host) = browser.and_then(|b| b.host()) {
+                    apply_page_zoom(&host, self.inner.scale.get());
+                }
                 let mut state = self.inner.state.borrow_mut();
                 state.url = url.map(ToString::to_string).unwrap_or_default();
                 state.error = None;
@@ -1419,7 +1452,7 @@ mod tests {
         // 2x2 black view; a 2x1 white popup at (1, 1) only fits its first column.
         let mut view = vec![0u8; 2 * 2 * 4];
         let popup = vec![255u8; 2 * 4];
-        blend_popup(&mut view, [2, 2], [1, 1, 2, 1], &popup, [2, 1], 1.0);
+        blend_popup(&mut view, [2, 2], [1, 1, 2, 1], &popup, [2, 1]);
         assert_eq!(&view[..12], &[0; 12]);
         assert_eq!(&view[12..16], &[255; 4]);
     }
@@ -1451,10 +1484,12 @@ mod tests {
 
     #[test]
     fn fractional_scale_computes_exact_one_to_one_phys_and_crops_ceil_overhang() {
-        let (dip, phys) = dip_and_phys_for_rect(1019.2, 673.4, 1.25);
+        let (view, phys) = view_and_phys_for_rect(1019.2, 673.4, 1.25);
         assert_eq!(phys, [1274, 842]);
-        assert!(dip[0] as f32 * 1.25 >= phys[0] as f32);
-        assert!(dip[1] as f32 * 1.25 >= phys[1] as f32);
+        assert_eq!(view, [1274, 842]);
+        // 1.25x page zoom is 1.2^level.
+        assert!((1.2f64.powf(page_zoom(1.25)) - 1.25).abs() < 1e-9);
+        assert_eq!(page_zoom(1.0), 0.0);
 
         // 3x2 image cropped to 2x2 keeps the top-left 2x2 pixels intact.
         let src = [
@@ -1481,5 +1516,8 @@ mod tests {
         assert!(schedule.is_due(Instant::now()));
         schedule.clear();
         assert!(!schedule.is_due(Instant::now()));
+        // Without new requests the safety pump still comes due.
+        let later = Instant::now() + Duration::from_millis(MAX_FALLBACK_PUMP_MS + 1);
+        assert!(schedule.is_due(later));
     }
 }

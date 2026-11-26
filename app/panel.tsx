@@ -701,15 +701,10 @@ function ChangesView(props: { cwd: string }): Element {
   );
 }
 
-// ---- Archived: sessions closed during this run, newest first. -------------------------------
+// ---- Archived sessions, newest first. ------------------------------------------------------
 
 function archivedSessions(): ArchivedItem[] {
   return sessionsState.value.archived ?? [];
-}
-
-// One entry, or the whole archive without an id.
-function forgetArchived(id?: number): void {
-  requestHost({ type: "forgetArchived", id });
 }
 
 function timeAgo(unixSeconds: number): string {
@@ -727,17 +722,27 @@ function cliDisplayName(id: string): string {
 
 function ArchivedRow(props: { item: () => ArchivedItem }): Element {
   const hovered = signal(false);
+  const menu = signal(false);
+  const background = () => hovered.value || menu.value
+    ? mixColor(palette().appBg, palette().textPrimary, controlState.rowHoverMix)
+    : palette().appBg;
   const detail = () => {
     const item = props.item();
-    return `${basename(item.cwd) || item.cwd} · ${cliDisplayName(item.cli)} · ${timeAgo(item.closedAt)}`;
+    return `${basename(item.cwd) || item.cwd} · ${item.alive ? "Running" : "Exited"} · ${timeAgo(item.archivedAt)}`;
+  };
+  const restore = () => {
+    menu.value = false;
+    requestHost({ type: "restoreSession", id: props.item().id });
   };
   return (
     <Row
       style={{ padding: archivedLayout.rowPadding, align: "center", gap: spacing.unit * 3, shrink: 0 }}
       onHover={(inside) => { hovered.value = inside; }}
+      onPress={restore}
+      onContextMenu={() => { menu.value = true; }}
       paint={() => ({
         radius: radii.lg,
-        hover: { background: rowHoverBackground() },
+        background: background(),
         transitions: [smoothTransition("background", motion.fast)],
       })}
     >
@@ -745,65 +750,70 @@ function ArchivedRow(props: { item: () => ArchivedItem }): Element {
         style={{ width: archivedLayout.icon, height: archivedLayout.icon, shrink: 0 }}
         paint={() => ({ opacity: hovered.value ? 1 : workspaceTabLayout.dimOpacity, transitions: [smoothTransition("opacity", motion.fast)] })} />
       <Column style={{ grow: 1, minWidth: 0, gap: spacing.unit / 2 }}>
-        <ShimmerText
+        <FadeText
           text={() => cleanTitle(props.item().title) || cliDisplayName(props.item().cli)}
           font={{ family: fontFamilies.sans, size: typeScale.label }}
           color={() => (hovered.value ? palette().textPrimary : palette().textSecondary)}
-          marquee={() => hovered.value}
+          background={background}
+          layoutChanged={() => { void tilingState.value; void resizeDrag.value; }}
         />
         <Text lines={1} font={{ family: fontFamilies.sans, size: typeScale.caption }}
           paint={() => ({ color: palette().textMuted })}>
           {detail}
         </Text>
       </Column>
-      <Row
-        style={{ align: "center", gap: 0, shrink: 0 }}
-        paint={() => ({ opacity: hovered.value ? 1 : 0, transitions: [smoothTransition("opacity", motion.fast)] })}
-      >
-        <IconButton size="sm" side="top" icon="square-terminal" label="New session here"
-          onPress={() => showProjectDialog("session", props.item().cwd, props.item().cli === "terminal" ? undefined : props.item().cli)} />
-        <IconButton size="sm" side="top" icon="trash" label="Remove from archive" onPress={() => forgetArchived(props.item().id)} />
-      </Row>
+      <SessionMenuButton open={menu} visible={hovered} side="bottom">
+        <MenuItem icon="arrow-up" label="Restore session" onPress={restore} />
+        <MenuItem icon="folder-open" label="Show project folder" onPress={() => {
+          menu.value = false;
+          revealPath(props.item().cwd);
+        }} />
+        <Show when={() => !props.item().alive}>
+          {() => <MenuItem icon="trash" label="Remove exited session" onPress={() => {
+            menu.value = false;
+            closeSession(props.item().id);
+          }} />}
+        </Show>
+      </SessionMenuButton>
     </Row>
   );
 }
 
 function ArchivedView(): Element {
   const layout = archivedLayout;
-  const count = () => archivedSessions().length;
   return (
-    <Column style={{ grow: 1, minWidth: 0, minHeight: 0, scroll: true }}>
-      <Row style={{ justify: "center", shrink: 0, padding: layout.padding }}>
-        <Column style={{ grow: 1, minWidth: 0, maxWidth: layout.maxWidth, gap: layout.headerGap }}>
-          <Row style={{ align: "center", gap: spacing.unit * 3 }}>
-            <Column style={{ grow: 1, minWidth: 0, gap: spacing.unit }}>
+    <Dynamic value={() => archivedSessions().length === 0} style={{ grow: 1, minWidth: 0, minHeight: 0 }}>
+      {(empty) => empty ? (
+        <Column style={{ grow: 1, minHeight: 0, scroll: true, align: "center", padding: layout.padding }}>
+          <Box style={{ grow: 1 }} />
+          <Column style={{ minWidth: 0, maxWidth: layout.emptyWidth, shrink: 0, align: "center", gap: layout.headerGap }}>
+            <Glyph name="archive" size={layout.icon} color={() => palette().textSecondary} />
+            <EmptyState centered title="No archived sessions"
+              detail="Choose Archive session from a session’s menu. You can restore it here." />
+          </Column>
+          <Box style={{ grow: 1 }} />
+        </Column>
+      ) : (
+        <Column style={{ grow: 1, minHeight: 0, scroll: true }}>
+          <Row style={{ justify: "center", shrink: 0, padding: layout.padding }}>
+            <Column style={{ grow: 1, minWidth: 0, maxWidth: layout.maxWidth, gap: layout.headerGap }}>
               <Text font={{ family: fontFamilies.sans, size: typeScale.heading, weight: fontWeights.medium }}
                 paint={() => ({ color: palette().textPrimary })}>Archived sessions</Text>
-              <Show when={() => count() > 0}>
-                {() => <Text lines={1} font={{ family: fontFamilies.sans, size: typeScale.caption }}
-                  paint={() => ({ color: palette().textMuted })}>
-                  {() => `${count()} closed ${count() === 1 ? "session" : "sessions"} · kept until icy quits`}
-                </Text>}
-              </Show>
+              <For each={archivedSessions} key={(item) => item.id} style={{ gap: spacing.hairline * 2 }}>
+                {(item) => <ArchivedRow item={item} />}
+              </For>
             </Column>
-            <Show when={() => count() > 0} style={{ shrink: 0 }}>
-              {() => <GhostButton icon="trash" label="Clear all" onPress={() => forgetArchived()} />}
-            </Show>
           </Row>
-          <Show when={() => count() === 0}>
-            {() => <EmptyState title="No archived sessions" detail="Closed sessions stay here until icy quits." />}
-          </Show>
-          <For each={archivedSessions} key={(item) => item.id} style={{ gap: 1 }}>
-            {(item) => <ArchivedRow item={item} />}
-          </For>
         </Column>
-      </Row>
-    </Column>
+      )}
+    </Dynamic>
   );
 }
 
-const CODE_FONT = { family: fontFamilies.mono, size: editorLayout.codeSize, lineHeight: editorLayout.codeLineHeight };
-const CODE_LINE = CODE_FONT.size * CODE_FONT.lineHeight;
+// Whole-pixel line pitch: a fractional one (12.5 × 1.5 = 18.75) leaves an antialiased seam
+// between the selection fills of two lines.
+const CODE_LINE = Math.round(editorLayout.codeSize * editorLayout.codeLineHeight);
+const CODE_FONT = { family: fontFamilies.mono, size: editorLayout.codeSize, lineHeight: CODE_LINE / editorLayout.codeSize };
 const CODE_CHAR = CODE_FONT.size * editorLayout.monoAdvance;
 const CODE_GUTTER = editorLayout.gutterWidth + editorLayout.gutterGap + editorLayout.lineEndPadding;
 const DIFF_CONTEXT = 3;
@@ -910,8 +920,10 @@ function columnAt(text: string, x: number, y: number, rowWidth: number): number 
   return seg.end;
 }
 
-// Splits spans at the selection bounds [from, to) so the selected part gets the selection fill.
-function selectSpans(spans: Span[], from: number, to: number): Span[] {
+// Splits spans at the selection bounds [from, to) so the selected part gets the selection fill;
+// a `to` past the text adds the selected line-break cell.
+// `radius` rounds a one-line selection; lines of a longer one stay square so they join into one block.
+function selectSpans(spans: Span[], from: number, to: number, radius: number): Span[] {
   const out: Span[] = [];
   let start = 0;
   for (const span of spans) {
@@ -921,13 +933,15 @@ function selectSpans(spans: Span[], from: number, to: number): Span[] {
       if (b <= a) continue;
       const piece = { ...span, text: text.slice(a - start, b - start) };
       if (selected) {
-        piece.background = palette().selection;
-        piece.backgroundRadius = editorLayout.selectionRadius;
+        piece.background = selectionFill();
+        piece.backgroundRadius = radius;
       }
       out.push(piece);
     }
     start = end;
   }
+  // The line break past the text (see `lineSelection`).
+  if (from <= start && to > start) out.push({ text: " ", background: selectionFill(), backgroundRadius: radius });
   return out;
 }
 
@@ -944,6 +958,8 @@ function firstAbove(offsets: number[], y: number): number {
 
 // Text position as [0-based line, UTF-16 column]; RowPoint is a pointer in a mounted or estimated row.
 type TextPoint = [number, number];
+// The selected [from, to) columns of one line and the fill's corner radius.
+type LineSelection = [from: number, to: number, radius: number];
 interface RowPoint { index: number; x: number; y: number; top: number; width: number }
 
 // Windowed scroll list: only rows near the viewport are mounted, the rest are two spacers sized
@@ -953,6 +969,10 @@ function LazyRows<T>(props: {
   items: () => T[];
   key: (item: T) => string;
   reveal?: () => string | null;
+  // Where the revealed row lands, as a fraction of the viewport (its top at 1/3 by default; 0.5 centres
+  // it), and whether the list glides there instead of jumping.
+  revealAlign?: number;
+  revealSmooth?: boolean;
   resetScrollOn?: () => string;
   padding?: [number, number];
   measureKey?: (width: number) => number;
@@ -1083,9 +1103,11 @@ function LazyRows<T>(props: {
       if (nodeId === undefined || version !== revealVersion) return;
       const index = items.value.findIndex((item) => props.key(item) === target);
       if (index < 0) return;
-      scrollTo(nodeId, {
-        offset: Math.max(0, padTop + rowTop(index) - (view.value.client || editorLayout.fallbackHeight) / 3),
-      });
+      const client = view.value.client || editorLayout.fallbackHeight;
+      const offset = props.revealAlign === undefined
+        ? padTop + rowTop(index) - client / 3
+        : padTop + (rowTop(index) + rowTop(index + 1)) / 2 - client * props.revealAlign;
+      scrollTo(nodeId, { offset: Math.max(0, offset), smooth: props.revealSmooth });
     });
   });
 
@@ -1132,7 +1154,7 @@ function SourceLines(props: {
   doc: () => ViewerView;
   paintOffset?: () => [number, number];
   select?: (anchor: TextPoint, head: TextPoint, phase: DragPhase, at: RowPoint) => void;
-  selection?: (num: number) => [number, number] | null;
+  selection?: (num: number) => LineSelection | null;
   overlay?: () => Element;
 }): Element {
   return (
@@ -1155,11 +1177,11 @@ function SourceLines(props: {
     >
       {(line, ref) => {
         // Per-row range: only a row whose selection changed re-lays out its spans.
-        const range = signal<[number, number] | null>(null);
+        const range = signal<LineSelection | null>(null);
         let current = "";
         effect(() => {
           const next = props.selection?.(line().num) ?? null;
-          const key = next ? `${next[0]}:${next[1]}` : "";
+          const key = next ? next.join(":") : "";
           if (key === current) return;
           current = key;
           range.value = next;
@@ -1180,7 +1202,7 @@ function SourceLines(props: {
           </Text>
           <Text style={{ grow: 1, minWidth: 0 }} font={CODE_FONT} spans={() => {
             const r = range.value;
-            return r ? selectSpans(codeSpans(line()), r[0], r[1]) : codeSpans(line());
+            return r ? selectSpans(codeSpans(line()), r[0], r[1], r[2]) : codeSpans(line());
           }}>
             {() => visibleCode(line().text)}
           </Text>
@@ -1538,13 +1560,6 @@ function TileActions(props: { id: () => number; spec: () => TileSpec; menuOpen: 
         if (kind === "review") {
           return <Box />; // Review keeps its refresh control visible in its own toolbar.
         }
-        if (kind === "archived") {
-          return (
-            <Show when={() => archivedSessions().length > 0}>
-              {() => <IconButton size="sm" side="bottom" icon="trash" label="Clear archive" onPress={() => forgetArchived()} />}
-            </Show>
-          );
-        }
         if (kind === "metrics") {
           return <IconButton size="sm" side="bottom" icon="refresh" label="Refresh local usage"
             disabled={() => metricsScanState.value === "loading"} onPress={scanMetrics} />;
@@ -1628,12 +1643,18 @@ function TilePane(props: { id: () => number; focused: () => boolean; multiPane: 
               <Glyph name={() => tileGlyph(spec())} size={14} color={() => palette().textMuted} />
               {/* Title always visible; the full path lives in the page header while focused. */}
               <Box style={{ grow: 1, minWidth: 0 }}>
-                <ShimmerText
+                <FadeText
                   text={() => tileTitle(spec(), props.id())}
                   font={{ family: fontFamilies.sans, size: typeScale.label }}
                   color={() => (props.focused() ? palette().textPrimary : palette().textSecondary)}
-                  shimmer={() => false}
-                  marquee={() => hovered.value}
+                  background={() => palette().appBg}
+                  layoutChanged={() => {
+                    void tilingState.value;
+                    void resizeDrag.value;
+                    void hovered.value;
+                    void menuOpen.value;
+                    void diffStatOf(spec());
+                  }}
                 />
               </Box>
             </Row>
@@ -1660,6 +1681,13 @@ function TilePane(props: { id: () => number; focused: () => boolean; multiPane: 
               paint={{ starting: { opacity: 0 }, transitions: [smoothTransition("opacity", motion.fast)] }}
             >
               <TileActions id={props.id} spec={spec} menuOpen={menuOpen} />
+              <Show when={() => tilingState.value.mode === "niri" && !tilingState.value.maximized} style={{ shrink: 0 }}>
+                {() => <IconButton size="sm" side="bottom" icon="columns" label="Maximize column" keys={() => keysFor("layout.maximizeColumn")} onPress={() => {
+                  menuOpen.value = false;
+                  if (!props.focused()) selectSession(props.id());
+                  tilingAction("maximizeColumn");
+                }} />}
+              </Show>
               <IconButton size="sm" side="bottom" icon="maximize" label="Fullscreen pane" keys={() => keysFor("view.fullscreen")} onPress={() => {
                 menuOpen.value = false;
                 if (!props.focused()) selectSession(props.id());

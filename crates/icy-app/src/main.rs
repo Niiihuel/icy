@@ -3,12 +3,14 @@
 mod browser;
 mod font_preview;
 mod icons;
+mod pixel_blast;
 mod release_glow;
 #[cfg(test)]
 mod review_tests;
 mod window;
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -30,9 +32,11 @@ use icy_core::session::Session;
 use icy_core::session::SessionInfo;
 use icy_core::session_server::{self, Client as SessionClient, Spawn as TerminalSpawn, Terminal};
 use icy_core::syntax::{self, HighlightRange};
-use icy_core::tiling::{DropTarget, FocusDir, RESIZE_STEP, TilingMode, TilingView, Workspaces};
+use icy_core::tiling::{
+    ColumnView, DropTarget, FocusDir, RESIZE_STEP, TilingMode, TilingView, Workspaces,
+};
 use icy_core::updater::{self, UpdateState};
-use icy_core::vt::{DEFAULT_BG, Screen};
+use icy_core::vt::{DEFAULT_BG, Row as VtRow, Screen};
 use jsnir::host::Host;
 use jsnir::text::TextEngine;
 use serde::Serialize;
@@ -55,20 +59,25 @@ const DEFAULT_ROWS: u16 = 38;
 // Only the newest foreground document may navigate the preview window.
 static VIEWER_GENERATION: AtomicU64 = AtomicU64::new(0);
 const SCREEN_FRAME_MIN_INTERVAL: Duration = Duration::from_millis(16);
+const SESSION_STATUS_INTERVAL: Duration = Duration::from_millis(125);
 /// How often the sidebar usage meters rescan local transcripts.
 const CLI_USAGE_REFRESH: Duration = Duration::from_secs(120);
 /// Live limit endpoints (Claude OAuth usage, `agy /usage`, Grok billing); Orca never polls them
 /// more often than every 5 minutes.
 const REMOTE_LIMITS_REFRESH: Duration = Duration::from_secs(600);
 
-// Geist Mono 13px metrics (lineHeight 1.4 -> 18.2px, advance ~7.82px).
-const CELL_WIDTH_PX: f32 = 7.82;
-const CELL_HEIGHT_PX: f32 = 18.2;
+// Initial PTY geometry mirrors WorkspaceShell, TilingWorkspaceView and TerminalPane.
+// The measured grid takes over once JSNIR lays out the new pane.
+const CELL_ADVANCE: f32 = 0.6;
+const CELL_LINE_HEIGHT: f32 = 1.4;
+const TERMINAL_PADDING_X: f32 = 16.0;
+const TERMINAL_PADDING_Y: f32 = 10.0;
 const SIDEBAR_WIDTH_PX: f32 = 224.0;
-// Page header (44) + tab row (40), see app/tabs.tsx.
-// The single page header (tabs + actions) above the tiling.
 const TAB_BAR_HEIGHT_PX: f32 = 44.0;
+const WORKSPACE_MARGIN_PX: f32 = 8.0;
+const FRAME_INSET_PX: f32 = 1.0;
 const PANE_GAP_PX: f32 = 8.0;
+const PANE_HEADER_PX: f32 = 30.0;
 
 #[derive(PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,7 +130,7 @@ struct RowPayload {
 struct ScreenPayload {
     #[serde(flatten)]
     meta: ScreenMeta,
-    rows: Vec<RowPayload>,
+    rows: Vec<Arc<RowPayload>>,
 }
 
 #[derive(PartialEq, Eq, Serialize)]
@@ -155,6 +164,12 @@ struct TerminalSnapshot {
     cwd: PathBuf,
     screen: Screen,
     placements: Vec<VisibleImage>,
+}
+
+#[derive(Default)]
+struct TerminalRowCache {
+    source: Vec<VtRow>,
+    rendered: Vec<Arc<RowPayload>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -386,19 +401,15 @@ struct SessionsPayload {
     items: Vec<SessionInfo>,
 }
 
-/// A closed session, listed in the Archived window until icy quits.
+/// A session hidden from the workspace, available to restore from Archived.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ArchivedSession {
-    id: u64,
-    title: String,
-    cli: String,
-    cwd: PathBuf,
+    #[serde(flatten)]
+    session: SessionInfo,
     /// Unix seconds.
-    closed_at: u64,
+    archived_at: u64,
 }
-
-const ARCHIVE_LIMIT: usize = 200;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -416,6 +427,8 @@ struct ViewerLine {
 struct ViewerPayload {
     #[serde(skip)]
     generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intent: Option<u64>,
     cwd: PathBuf,
     requested_path: String,
     background: bool,
@@ -530,6 +543,7 @@ impl ViewerPayload {
     fn closed() -> Self {
         Self {
             generation: 0,
+            intent: None,
             cwd: PathBuf::new(),
             requested_path: String::new(),
             background: false,
@@ -637,6 +651,8 @@ enum BridgeEvent {
     GitBlame(Value),
     /// A browser tile request; the window thread owns CEF and applies it.
     Browser(browser::Command),
+    /// A context-menu edit (`copy`, `cut`, `paste`, `selectAll`) for the focused editor.
+    EditorCommand(String),
     CapturedKey(String),
     KeybindsDirty(Vec<&'static str>),
     QuitApp,
@@ -653,8 +669,8 @@ struct SessionManager {
     github: GitHubStatus,
     update: UpdateState,
     next_id: u64,
-    /// Newest first, at most `ARCHIVE_LIMIT`.
-    archived: Vec<ArchivedSession>,
+    /// Parked terminal IDs and their archive timestamps.
+    archived: BTreeMap<u64, u64>,
     cols: u16,
     rows: u16,
     viewport_w: f32,
@@ -689,7 +705,7 @@ impl SessionManager {
             github: GitHubStatus::default(),
             update: UpdateState::initial(),
             next_id: 1,
-            archived: Vec::new(),
+            archived: BTreeMap::new(),
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
             viewport_w: 1280.0,
@@ -722,15 +738,22 @@ impl SessionManager {
                 let _ = notices.send(BridgeEvent::PtyDirty);
             },
         )?;
+        let terminal_ids: BTreeSet<_> = attachment.terminals.iter().map(|info| info.id).collect();
+        let mut archived = client.load_archive()?;
+        let stored = archived.len();
+        archived.retain(|id, _| terminal_ids.contains(id));
+        if archived.len() != stored {
+            client.save_archive(&archived)?;
+        }
+        self.archived = archived;
         self.sessions = attachment
             .terminals
             .into_iter()
             .map(|info| client.terminal(info))
             .collect();
         if let Some(mut layout) = attachment.layout {
-            let live_ids: BTreeSet<_> = self.sessions.iter().map(|session| session.id).collect();
             for pane in layout.all_panes() {
-                if !live_ids.contains(&pane) {
+                if !terminal_ids.contains(&pane) || self.archived.contains_key(&pane) {
                     layout.remove_session(pane);
                 }
             }
@@ -742,7 +765,9 @@ impl SessionManager {
         }
         // A terminal started just before a UI crash can exist before its layout was sent.
         for session in &self.sessions {
-            if self.tiling.workspace_of(session.id).is_none() {
+            if !self.archived.contains_key(&session.id)
+                && self.tiling.workspace_of(session.id).is_none()
+            {
                 self.tiling.open_pane(session.id, false);
             }
             self.next_id = self.next_id.max(session.id + 1);
@@ -803,6 +828,7 @@ impl SessionManager {
     }
 
     fn place_session(&mut self, session: impl Into<Terminal>, stack_vertical: bool) -> u64 {
+        VIEWER_GENERATION.fetch_add(1, Ordering::Relaxed);
         let session = session.into();
         let id = session.id;
         self.sessions.push(session);
@@ -821,7 +847,7 @@ impl SessionManager {
         }
     }
 
-    fn shell_spawn(&self, id: u64, title: String, cwd: PathBuf) -> TerminalSpawn {
+    fn shell_spawn(id: u64, title: String, cwd: PathBuf, size: (u16, u16)) -> TerminalSpawn {
         let (program, args) = platform::default_shell();
         TerminalSpawn {
             id,
@@ -829,7 +855,7 @@ impl SessionManager {
             cwd,
             program,
             args,
-            size: (self.cols, self.rows),
+            size,
             cli_hint: None,
             initial_output: None,
         }
@@ -838,8 +864,9 @@ impl SessionManager {
     fn create_session_in(&mut self, stack_vertical: bool, cwd: PathBuf) -> Result<u64, String> {
         let id = self.allocate_session_id();
         let title = format!("shell-{id}");
+        let size = self.new_terminal_size(id, stack_vertical);
         let session = self
-            .spawn_terminal(self.shell_spawn(id, title, cwd))
+            .spawn_terminal(Self::shell_spawn(id, title, cwd, size))
             .map_err(|e| format!("failed to spawn shell: {e}"))?;
         Ok(self.place_session(session, stack_vertical))
     }
@@ -859,6 +886,7 @@ impl SessionManager {
             .ok_or_else(|| format!("unknown CLI: {cli_id}"))?;
 
         let id = self.allocate_session_id();
+        let size = self.new_terminal_size(id, false);
         let mut args = cli.args.clone();
         if let Some(text) = prompt.map(str::trim).filter(|t| !t.is_empty()) {
             if cli.id == "opencode" {
@@ -873,7 +901,7 @@ impl SessionManager {
             cwd: cwd.clone(),
             program: cli.command.clone(),
             args,
-            size: (self.cols, self.rows),
+            size,
             cli_hint: Some(cli.id),
             initial_output: None,
         });
@@ -882,7 +910,7 @@ impl SessionManager {
             Ok(s) => s,
             Err(_) => {
                 // Fallback to interactive shell with a clear hint if the CLI binary is not in PATH.
-                let mut shell = self.shell_spawn(id, cli.name.clone(), cwd);
+                let mut shell = Self::shell_spawn(id, cli.name.clone(), cwd, size);
                 shell.initial_output = Some(format!(
                     "\x1b[33m[icy]\x1b[0m `{}` was not found in PATH — opened shell instead.\r\n",
                     cli.command
@@ -896,8 +924,9 @@ impl SessionManager {
     }
 
     /// Opens a non-terminal tile (file, diff, review, files tree) in the tiling,
-    /// as a new column or stacked below the focused pane, and focuses it.
+    /// as a new column or stacked below the focused pane.
     fn open_tile(&mut self, stack_vertical: bool, cwd: PathBuf) -> u64 {
+        VIEWER_GENERATION.fetch_add(1, Ordering::Relaxed);
         let id = self.allocate_session_id();
         self.tiles.insert(id, cwd);
         self.tiling.open_pane(id, stack_vertical);
@@ -914,30 +943,50 @@ impl SessionManager {
         let Some(pos) = self.sessions.iter().position(|s| s.id == id) else {
             return false;
         };
-        // Read the CLI before the kill: afterwards there is no foreground process to name it.
-        let info = self.sessions[pos].info();
+        if self.archived.contains_key(&id) && self.sessions[pos].is_alive() {
+            return false;
+        }
         if self.sessions[pos].close().is_err() {
             return false;
         }
         self.sessions.remove(pos);
         self.terminal_sizes.remove(&id);
-        let closed_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        self.archived.insert(
-            0,
-            ArchivedSession {
-                id: info.id,
-                title: info.title,
-                cli: info.cli,
-                cwd: info.cwd,
-                closed_at,
-            },
-        );
-        self.archived.truncate(ARCHIVE_LIMIT);
+        if self.archived.remove(&id).is_some()
+            && let Some(client) = &self.session_client
+            && let Err(error) = client.save_archive(&self.archived)
+        {
+            eprintln!("icy: failed to save terminal archive: {error}");
+        }
         self.tiling.remove_session(id);
         let _ = self.apply_tiled_sizes();
         true
+    }
+
+    fn set_session_archived(&mut self, id: u64, archive: bool) -> std::io::Result<bool> {
+        if self.archived.contains_key(&id) == archive || !self.sessions.iter().any(|s| s.id == id) {
+            return Ok(false);
+        }
+        let mut next = self.archived.clone();
+        if archive {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            next.insert(id, now);
+        } else {
+            next.remove(&id);
+        }
+        if let Some(client) = &self.session_client {
+            client.save_archive(&next)?;
+        }
+        self.archived = next;
+        if archive {
+            self.terminal_sizes.remove(&id);
+            self.tiling.remove_session(id);
+        } else {
+            self.tiling.open_pane(id, false);
+        }
+        self.apply_tiled_sizes();
+        Ok(true)
     }
 
     fn step_tab(&mut self, delta: isize) -> bool {
@@ -952,13 +1001,18 @@ impl SessionManager {
             .unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(order.len() as isize) as usize;
         let next_id = order[next];
+        VIEWER_GENERATION.fetch_add(1, Ordering::Relaxed);
         self.tiling.focus_session(next_id);
         let _ = self.apply_tiled_sizes();
         true
     }
 
     fn select_session(&mut self, id: u64) -> bool {
+        if self.archived.contains_key(&id) {
+            return false;
+        }
         if self.tiles.contains_key(&id) || self.sessions.iter().any(|s| s.id == id) {
+            VIEWER_GENERATION.fetch_add(1, Ordering::Relaxed);
             self.tiling.focus_session(id);
             let _ = self.apply_tiled_sizes();
             true
@@ -1060,42 +1114,83 @@ impl SessionManager {
         self.apply_tiled_sizes()
     }
 
+    fn new_terminal_size(&self, id: u64, stack_vertical: bool) -> (u16, u16) {
+        let mut tiling = self.tiling.clone();
+        tiling.open_pane(id, stack_vertical);
+        let view = tiling.snapshot();
+        view.columns
+            .iter()
+            .find_map(|column| {
+                let index = column.panes.iter().position(|&pane| pane == id)?;
+                Some(self.estimate_terminal_size(&view, column, index))
+            })
+            .unwrap_or((DEFAULT_COLS, DEFAULT_ROWS))
+    }
+
+    fn estimate_terminal_size(
+        &self,
+        view: &TilingView,
+        column: &ColumnView,
+        index: usize,
+    ) -> (u16, u16) {
+        let area_w = (self.viewport_w
+            - self.sidebar_w
+            - self.panel_w
+            - WORKSPACE_MARGIN_PX
+            - 2.0 * FRAME_INSET_PX)
+            .max(0.0);
+        let area_h =
+            (self.viewport_h - TAB_BAR_HEIGHT_PX - 2.0 * (WORKSPACE_MARGIN_PX + FRAME_INSET_PX))
+                .max(0.0);
+        let tiled = !view.maximized
+            && (view.columns.len() > 1 || column.panes.len() > 1 || column.width < 1.0 - 1e-3);
+        let (grid_w, grid_h) = if view.maximized && column.panes[index] == view.focused_session {
+            (area_w, area_h)
+        } else {
+            let gap = if tiled { PANE_GAP_PX } else { 0.0 };
+            let inset = if tiled { FRAME_INSET_PX } else { 0.0 };
+            let header = if tiled { PANE_HEADER_PX } else { 0.0 };
+            let usable = (area_w - gap).max(0.0);
+            let x = (column.x - view.view_offset) * usable;
+            let pane_w = (x + column.width * usable).round() - (x + gap).round();
+            let row_gap = if column.panes.len() > 1 {
+                PANE_GAP_PX
+            } else {
+                0.0
+            };
+            let total = area_h - 2.0 * gap + row_gap;
+            let start = column.heights[..index].iter().sum::<f32>();
+            let pane_h = ((start + column.heights[index]) * total - row_gap).round()
+                - (start * total).round();
+            (pane_w - 2.0 * inset, pane_h - 2.0 * inset - header)
+        };
+        let font_size = f32::from(self.config.font_size.clamp(11, 18));
+        let cols = ((grid_w - 2.0 * TERMINAL_PADDING_X) / (font_size * CELL_ADVANCE)) as u16;
+        let rows = ((grid_h - 2.0 * TERMINAL_PADDING_Y) / (font_size * CELL_LINE_HEIGHT)) as u16;
+        (cols.clamp(2, 400), rows.clamp(1, 200))
+    }
+
     fn apply_tiled_sizes(&mut self) -> bool {
-        let sidebar_w = self.sidebar_w;
-        let viewer_w = self.panel_w;
-        let avail_w = (self.viewport_w - sidebar_w - viewer_w - 28.0).max(240.0);
-        let avail_h = (self.viewport_h - TAB_BAR_HEIGHT_PX - 28.0).max(160.0);
-
-        let scale = (self.config.font_size as f32 / 13.0).clamp(0.8, 1.5);
-        let cell_w = CELL_WIDTH_PX * scale;
-        let cell_h = CELL_HEIGHT_PX * scale;
-
-        // Every column keeps its own PTY size (niri columns stay sized while scrolled off-screen).
         let snapshot = self.tiling.snapshot();
         let mut focused_size = (self.cols, self.rows);
-        for col in &snapshot.columns {
-            let col_w = (col.width * avail_w - PANE_GAP_PX).max(160.0);
-            for (&sid, &h) in col.panes.iter().zip(&col.heights) {
-                // A fullscreen pane fills the area; the others keep their tiled size.
-                let full = snapshot.maximized && sid == snapshot.focused_session;
-                let (pane_w, h) = if full {
-                    ((avail_w - PANE_GAP_PX).max(160.0), 1.0)
-                } else {
-                    (col_w, h)
-                };
-                let pane_cols = (((pane_w - 24.0) / cell_w).floor() as u16).clamp(20, 400);
-                let pane_h = (h * avail_h - PANE_GAP_PX).max(80.0);
-                let pane_rows = (((pane_h - 16.0) / cell_h).floor() as u16).clamp(5, 200);
-                let (pane_cols, pane_rows) = self
-                    .terminal_sizes
-                    .get(&sid)
-                    .copied()
-                    .unwrap_or((pane_cols, pane_rows));
-                if let Some(session) = self.sessions.iter().find(|s| s.id == sid) {
-                    let _ = session.resize(pane_cols, pane_rows);
+        for column in &snapshot.columns {
+            for (index, &id) in column.panes.iter().enumerate() {
+                if snapshot.maximized && id != snapshot.focused_session {
+                    continue;
                 }
-                if sid == snapshot.focused_session {
-                    focused_size = (pane_cols, pane_rows);
+                let size = if let Some(&size) = self.terminal_sizes.get(&id) {
+                    // Once measured, only the grid reports future sizes. Repeating its last
+                    // size here costs a synchronous round trip to an attached session server.
+                    size
+                } else {
+                    let size = self.estimate_terminal_size(&snapshot, column, index);
+                    if let Some(session) = self.sessions.iter().find(|s| s.id == id) {
+                        let _ = session.resize(size.0, size.1);
+                    }
+                    size
+                };
+                if id == snapshot.focused_session {
+                    focused_size = size;
                 }
             }
         }
@@ -1105,11 +1200,26 @@ impl SessionManager {
     }
 
     fn sessions_payload(&self) -> SessionsPayload {
+        let mut archived = Vec::with_capacity(self.archived.len());
+        let mut items = Vec::new();
+        for session in &self.sessions {
+            let info = session.info();
+            if let Some(&archived_at) = self.archived.get(&info.id) {
+                archived.push(ArchivedSession {
+                    session: info,
+                    archived_at,
+                });
+            } else {
+                items.push(info);
+            }
+        }
+        archived
+            .sort_unstable_by_key(|entry| std::cmp::Reverse((entry.archived_at, entry.session.id)));
         SessionsPayload {
             active_id: self.active_id(),
-            archived_count: u32::try_from(self.archived.len()).unwrap_or(u32::MAX),
-            archived: self.archived.clone(),
-            items: self.sessions.iter().map(Terminal::info).collect(),
+            archived_count: u32::try_from(archived.len()).unwrap_or(u32::MAX),
+            archived,
+            items,
         }
     }
 
@@ -1130,7 +1240,7 @@ impl SessionManager {
 
     fn visible_terminals(&self) -> impl Iterator<Item = &Terminal> {
         let ids: Vec<u64> = if self.overview {
-            self.sessions.iter().map(|s| s.id).collect()
+            self.tiling.all_panes()
         } else {
             self.tiling.visible_pane_ids()
         };
@@ -1282,6 +1392,7 @@ fn install_images_on_host(host: &mut Host, scale: f32) {
     for (name, rgba, size) in icons::load_static(scale) {
         host.set_image(name, rgba, size);
     }
+    pixel_blast::install_masks(host);
 }
 
 fn push_images(pusher: &Pusher, scale: f32) {
@@ -1300,7 +1411,7 @@ impl ScreenPayload {
                 .rows
                 .iter()
                 .enumerate()
-                .map(|(index, row)| (previous_rows.get(index) != Some(row)).then_some(row))
+                .map(|(index, row)| (previous_rows.get(index) != Some(row)).then_some(row.as_ref()))
                 .collect(),
         }
     }
@@ -1341,7 +1452,7 @@ impl TerminalSnapshot {
         }
     }
 
-    fn into_payload(self) -> ScreenPayload {
+    fn into_payload(self, cache: &mut TerminalRowCache) -> ScreenPayload {
         let Self {
             id,
             cwd,
@@ -1360,6 +1471,9 @@ impl TerminalSnapshot {
                 height: img.height,
             })
             .collect();
+        let rows = terminal_rows_payload(&screen.rows, &cwd, cache);
+        cache.source = screen.rows;
+        cache.rendered.clone_from(&rows);
         ScreenPayload {
             meta: ScreenMeta {
                 cols: screen.cols,
@@ -1370,31 +1484,31 @@ impl TerminalSnapshot {
                 display_offset: screen.display_offset,
                 images,
             },
-            rows: terminal_rows_payload(&screen.rows, &cwd),
+            rows,
         }
     }
 }
 
 fn build_screen_payload(session: &Terminal) -> ScreenPayload {
-    TerminalSnapshot::capture(session).into_payload()
+    TerminalSnapshot::capture(session).into_payload(&mut TerminalRowCache::default())
 }
 
 fn edit_preview_rows<'a>(
     start: usize,
-    rows: &'a [icy_core::vt::Row],
-    text: &'a [String],
+    rows: &'a [VtRow],
+    text: &'a [OnceCell<String>],
 ) -> impl Iterator<Item = Cow<'a, str>> {
     let mut next = start;
     std::iter::from_fn(move || {
         let start = next;
-        let first = text.get(start)?;
+        let first = text.get(start)?.get_or_init(|| rows[start].plain_text());
         next += 1;
         if !rows[start].wrapped {
             return Some(Cow::Borrowed(first.as_str()));
         }
         let mut joined = first.clone();
         while next < rows.len() && rows[next - 1].wrapped {
-            joined.push_str(&text[next]);
+            joined.push_str(text[next].get_or_init(|| rows[next].plain_text()));
             next += 1;
         }
         Some(Cow::Owned(joined))
@@ -1402,7 +1516,7 @@ fn edit_preview_rows<'a>(
 }
 
 fn osc8_links_for_logical_line(
-    screen_rows: &[icy_core::vt::Row],
+    screen_rows: &[VtRow],
     range: std::ops::Range<usize>,
 ) -> Vec<LinkRef> {
     let mut out = Vec::new();
@@ -1439,9 +1553,13 @@ fn osc8_links_for_logical_line(
     out
 }
 
-fn terminal_rows_payload(screen_rows: &[icy_core::vt::Row], cwd: &Path) -> Vec<RowPayload> {
+fn terminal_rows_payload(
+    screen_rows: &[VtRow],
+    cwd: &Path,
+    cache: &TerminalRowCache,
+) -> Vec<Arc<RowPayload>> {
     let mut rows = Vec::with_capacity(screen_rows.len());
-    let plain_rows: Vec<_> = screen_rows.iter().map(|row| row.plain_text()).collect();
+    let plain_rows: Vec<OnceCell<String>> = vec![OnceCell::new(); screen_rows.len()];
 
     let mut group_start = 0usize;
     while group_start < screen_rows.len() {
@@ -1450,12 +1568,25 @@ fn terminal_rows_payload(screen_rows: &[icy_core::vt::Row], cwd: &Path) -> Vec<R
             group_end += 1;
         }
         let group_range = group_start..group_end + 1;
+        // Reuse whole logical lines. Links can span rows, change as files appear, or contain
+        // diff previews taken from later rows, so keep resolving those lines on every frame.
+        if cache.source.get(group_range.clone()) == Some(&screen_rows[group_range.clone()])
+            && (group_start == 0 || !cache.source[group_start - 1].wrapped)
+            && (!screen_rows[group_end].wrapped || cache.source.len() == screen_rows.len())
+            && cache.rendered[group_range.clone()]
+                .iter()
+                .all(|row| row.links.is_empty())
+        {
+            rows.extend_from_slice(&cache.rendered[group_range]);
+            group_start = group_end + 1;
+            continue;
+        }
 
         let mut logical_plain = String::new();
         let mut row_ranges: Vec<(usize, usize)> = Vec::with_capacity(group_range.len());
         for idx in group_range.clone() {
             let start = logical_plain.len();
-            logical_plain.push_str(&plain_rows[idx]);
+            logical_plain.push_str(plain_rows[idx].get_or_init(|| screen_rows[idx].plain_text()));
             row_ranges.push((start, logical_plain.len()));
         }
 
@@ -1514,7 +1645,7 @@ fn terminal_rows_payload(screen_rows: &[icy_core::vt::Row], cwd: &Path) -> Vec<R
 
         for (offset, idx) in group_range.enumerate() {
             let row = &screen_rows[idx];
-            let plain = plain_rows[idx].clone();
+            let plain = plain_rows[idx].get().unwrap().clone();
             let (row_byte_start, row_byte_end) = row_ranges[offset];
 
             let mut row_detected: Vec<(usize, usize)> = Vec::new();
@@ -1603,12 +1734,12 @@ fn terminal_rows_payload(screen_rows: &[icy_core::vt::Row], cwd: &Path) -> Vec<R
                 }
             }
 
-            rows.push(RowPayload {
+            rows.push(Arc::new(RowPayload {
                 idx,
                 plain,
                 spans,
                 links,
-            });
+            }));
         }
 
         group_start = group_end + 1;
@@ -1858,6 +1989,7 @@ struct ViewerRequest {
     old_line: bool,
     edit: Option<links::EditPreview>,
     background: bool,
+    intent: Option<u64>,
 }
 
 impl ViewerRequest {
@@ -1876,6 +2008,7 @@ impl ViewerRequest {
             open_file_for_viewer(&self.path, self.line, self.col, &self.cwd)
         };
         view.generation = generation;
+        view.intent = self.intent;
         view.old_line = self.old_line;
         view.edit = self.edit;
         view.target_col = self.col;
@@ -2440,6 +2573,7 @@ fn handle_request(
                         .get("background")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    intent: payload.get("intent").and_then(Value::as_u64),
                 },
                 tx.clone(),
             )?;
@@ -2501,14 +2635,24 @@ fn handle_request(
             let _ = tx.send(BridgeEvent::PtyDirty);
             Ok("ok".into())
         }
-        "forgetArchived" => {
-            // One entry by `id`, or the whole list without one.
-            let id = payload.get("id").and_then(Value::as_u64);
+        "archiveSession" | "restoreSession" => {
+            let id = payload["id"].as_u64().ok_or("Missing session ID")?;
             let mut guard = manager.lock().unwrap();
-            guard
-                .archived
-                .retain(|entry| id.is_some_and(|id| entry.id != id));
-            let _ = tx.send(BridgeEvent::SessionsDirty);
+            match guard.set_session_archived(id, kind == "archiveSession") {
+                Ok(true) => {
+                    let _ = tx.send(BridgeEvent::TilingDirty);
+                    let _ = tx.send(BridgeEvent::PtyDirty);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let message = format!("Could not update the session archive: {error}");
+                    let _ = tx.send(BridgeEvent::PushNotice {
+                        kind: "error".into(),
+                        text: message.clone(),
+                    });
+                    return Err(message);
+                }
+            }
             Ok("ok".into())
         }
         "closeSession" => {
@@ -2543,7 +2687,7 @@ fn handle_request(
                 .and_then(Value::as_u64)
                 .ok_or_else(|| "missing session id".to_string())?;
             let mut guard = manager.lock().unwrap();
-            if guard.select_session(id) {
+            if guard.active_id() != id && guard.select_session(id) {
                 let _ = tx.send(BridgeEvent::SessionsDirty);
                 let _ = tx.send(BridgeEvent::TilingDirty);
                 let _ = tx.send(BridgeEvent::PtyDirty);
@@ -2583,6 +2727,11 @@ fn handle_request(
         "keyCapture" => {
             let on = payload.get("on").and_then(Value::as_bool).unwrap_or(false);
             window::KEY_CAPTURE.store(on, std::sync::atomic::Ordering::Relaxed);
+            Ok("ok".into())
+        }
+        "editorPreview" => {
+            let on = payload.get("on").and_then(Value::as_bool).unwrap_or(false);
+            window::EDITOR_PREVIEW.store(on, Ordering::Relaxed);
             Ok("ok".into())
         }
         "setKeybind" | "resetKeybind" => {
@@ -3103,11 +3252,6 @@ fn handle_request(
             window::PALETTE_CAPTURE.store(on, Ordering::Relaxed);
             Ok("ok".into())
         }
-        "projectDialogKeys" => {
-            let on = payload.get("on").and_then(Value::as_bool).unwrap_or(false);
-            window::PROJECT_DIALOG.store(on, std::sync::atomic::Ordering::Relaxed);
-            Ok("ok".into())
-        }
         "browser" => {
             if payload.get("op").and_then(Value::as_str) == Some("pointer") {
                 // `id` 0 releases the pointer; a browser only releases its own target.
@@ -3186,7 +3330,9 @@ fn handle_request(
                 .ok_or("Missing terminal rows")?
                 .clamp(1, 200) as u16;
             let mut guard = manager.lock().unwrap();
-            if let Some(session) = guard.sessions.iter().find(|s| s.id == id && s.is_alive()) {
+            if guard.terminal_sizes.get(&id) != Some(&(cols, rows))
+                && let Some(session) = guard.sessions.iter().find(|s| s.id == id && s.is_alive())
+            {
                 let resized = session.resize(cols, rows).map_err(|err| err.to_string())?;
                 guard.terminal_sizes.insert(id, (cols, rows));
                 if guard.active_id() == id {
@@ -3226,6 +3372,14 @@ fn handle_request(
         "agentShortcutCount" => {
             let count = payload["count"].as_u64().unwrap_or(0).min(9) as u16;
             window::AGENT_SHORTCUT_COUNT.store(count, Ordering::Relaxed);
+            Ok("ok".into())
+        }
+        "editorCommand" => {
+            let command = payload
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let _ = tx.send(BridgeEvent::EditorCommand(command.to_string()));
             Ok("ok".into())
         }
         "copyText" => {
@@ -3298,6 +3452,7 @@ fn run_bridge(
     // Icon overrides of the active theme currently pushed over the built-in glyphs.
     let mut applied_icons: BTreeMap<String, String> = BTreeMap::new();
     let mut sent_screens = None;
+    let mut rendered_rows = BTreeMap::<u64, TerminalRowCache>::new();
     let mut screen_dirty = false;
     let mut frame_sequence = 0;
     let mut pending_frame = None;
@@ -3305,12 +3460,16 @@ fn run_bridge(
     let mut scanning_usage = false;
     let mut workspace = None;
     let mut previous_sessions = None;
+    let mut next_status_refresh = Instant::now();
+    let mut status_dirty = false;
     // A program can begin a synchronized redraw without sending the closing marker (for
     // instance if it is interrupted). vte's deadline must be driven even when no bytes arrive.
     let mut sync_deadline: Option<Instant> = None;
 
     loop {
-        let event = if let Some(deadline) = sync_deadline {
+        let status_deadline = status_dirty.then_some(next_status_refresh);
+        let deadline = sync_deadline.into_iter().chain(status_deadline).min();
+        let event = if let Some(deadline) = deadline {
             rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
         } else {
             rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
@@ -3353,6 +3512,7 @@ fn run_bridge(
             BridgeEvent::Hello => {
                 previous_sessions = None;
                 sent_screens = None;
+                rendered_rows.clear();
                 pending_frame = None;
                 need_keybinds = true;
                 need_sessions = true;
@@ -3379,7 +3539,7 @@ fn run_bridge(
             }
             BridgeEvent::PtyDirty => {
                 need_screen = true;
-                need_sessions = true;
+                status_dirty = true;
             }
             BridgeEvent::SessionsDirty => need_sessions = true,
             BridgeEvent::TilingDirty => need_tiling = true,
@@ -3417,6 +3577,9 @@ fn run_bridge(
             BridgeEvent::Browser(command) => {
                 pusher.browser(command);
             }
+            BridgeEvent::EditorCommand(command) => {
+                pusher.editor_command(command);
+            }
             BridgeEvent::CapturedKey(chord) => pending_captured = Some(chord),
             BridgeEvent::KeybindsDirty(taken) => {
                 need_keybinds = true;
@@ -3442,7 +3605,7 @@ fn run_bridge(
                 let (changed, deadline) = session.update_sync_timeout(now);
                 if changed {
                     need_screen = true;
-                    need_sessions = true;
+                    status_dirty = true;
                 }
                 if let Some(deadline) = deadline {
                     sync_deadline =
@@ -3600,6 +3763,13 @@ fn run_bridge(
             let up = manager.lock().unwrap().update.clone();
             push_view(&pusher, "update", &up);
         }
+        // PTY output can redraw at frame rate. Agent detection and process metadata only need a
+        // periodic refresh, including a final refresh after the output goes quiet.
+        need_sessions |= status_dirty && Instant::now() >= next_status_refresh;
+        if need_tiling || need_sessions {
+            status_dirty = false;
+            next_status_refresh = Instant::now() + SESSION_STATUS_INTERVAL;
+        }
         if need_tiling {
             let (sessions, tiling, root) = {
                 let guard = manager.lock().unwrap();
@@ -3687,13 +3857,22 @@ fn run_bridge(
                 }
             }
             // Resolve links and diff rows after releasing the session manager for input.
+            rendered_rows.retain(|id, _| Some(*id) == context_id || visible.contains_key(id));
             let screens = TerminalScreens {
                 visible: visible
                     .into_iter()
-                    .map(|(id, screen)| (id, screen.into_payload()))
+                    .map(|(id, screen)| {
+                        (
+                            id,
+                            screen.into_payload(rendered_rows.entry(id).or_default()),
+                        )
+                    })
                     .collect(),
                 context_id,
-                context_screen: context_screen.map(TerminalSnapshot::into_payload),
+                context_screen: context_screen.map(|screen| {
+                    let cache = rendered_rows.entry(screen.id).or_default();
+                    screen.into_payload(cache)
+                }),
             };
             if sent_screens.as_ref() != Some(&screens) {
                 frame_sequence += 1;
@@ -3746,7 +3925,6 @@ fn run_offscreen(
         )
     };
 
-    install_images_on_host(&mut host, 1.0);
     for (key, data) in term_uploads {
         if let Some((rgba, size)) = icons::decode_term_image(&data) {
             host.set_image(key, rgba, size);
@@ -3770,6 +3948,7 @@ fn run_offscreen(
     host.push(serde_json::json!({ "view": "screen", "data": screen_payload }).to_string());
     host.push(serde_json::json!({ "view": "screens", "data": screens_map }).to_string());
 
+    pixel_blast::install_capture_mask(&mut host);
     match jsnir_gpu::capture_at(host, [1280, 800], 1.0, false, path) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -3957,7 +4136,8 @@ fn main() -> ExitCode {
                     }
                     // Panels and the overview are UI state: the TSX side handles them.
                     "session.new" | "column.new" | "pane.split" | "panel.overview"
-                    | "panel.side" | "panel.files" | "session.search" | "view.overview" => {
+                    | "panel.side" | "panel.files" | "session.search" | "view.overview"
+                    | "workspace.switcher" => {
                         let _ = shortcut_tx.send(BridgeEvent::ModalKey(id));
                         false
                     }
@@ -4368,10 +4548,7 @@ mod tests {
         host.pointer_down(PointSelection::Place);
         host.pointer_up();
         frame(&mut host);
-        assert!(
-            !rx.try_iter()
-                .any(|request| request.contains("projectDialogKeys"))
-        );
+        assert!(!rx.try_iter().any(|request| request.contains("paletteKeys")));
         host.pointer_move(None);
         let unhovered = frame(&mut host);
         assert!(image_point(&unhovered, RIGHT, true).is_none());
@@ -4666,8 +4843,7 @@ mod tests {
         ] {
             host.set_image(source.into(), rgba.to_vec(), [1, 1]);
         }
-        let overrides =
-            keybinds::Overrides::from([("view.fullscreen".into(), vec!["Alt+F".into()])]);
+        let overrides = keybinds::Overrides::from([("session.new".into(), vec!["Alt+F".into()])]);
         host.push(
             json!({"view": "keybinds", "data": {"items": keybinds::views(&overrides)}}).to_string(),
         );
@@ -4708,9 +4884,63 @@ mod tests {
         assert!(requests.contains(&json!({"type": "keyCapture", "on": true})));
         assert!(requests.contains(&json!({"type": "keyCapture", "on": false})));
         assert!(
-            requests.contains(&json!({"type": "setKeybind", "id": "view.fullscreen", "chord": ""}))
+            requests.contains(&json!({"type": "setKeybind", "id": "session.new", "chord": ""}))
         );
-        assert!(requests.contains(&json!({"type": "resetKeybind", "id": "view.fullscreen"})));
+        assert!(requests.contains(&json!({"type": "resetKeybind", "id": "session.new"})));
+    }
+
+    #[test]
+    fn archiving_and_restoring_keeps_the_original_terminal() {
+        let root = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::new(root.path().into(), Arc::new(|| {}));
+        let id = manager
+            .create_session_in(false, root.path().into())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        manager
+            .focused_terminal()
+            .unwrap()
+            .write_input(b"echo ARCHIVE_MARKER\r")
+            .unwrap();
+        let contains_history = |session: &Terminal| {
+            session
+                .frame()
+                .0
+                .rows
+                .iter()
+                .any(|row| row.plain_text().contains("ARCHIVE_MARKER"))
+        };
+        while !contains_history(manager.focused_terminal().unwrap()) {
+            assert!(
+                Instant::now() < deadline,
+                "terminal did not echo the marker"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(manager.set_session_archived(id, true).unwrap());
+        assert!(!manager.set_session_archived(id, true).unwrap());
+        assert!(manager.tiling.pane_order().is_empty());
+        assert!(!manager.select_session(id));
+        assert!(
+            !manager.close_session(id),
+            "an archived running session is protected"
+        );
+        manager.overview = true;
+        assert!(manager.visible_terminals().next().is_none());
+        let payload = manager.sessions_payload();
+        assert!(payload.items.is_empty());
+        assert_eq!(payload.archived_count, 1);
+        assert_eq!(payload.archived[0].session.id, id);
+
+        assert!(manager.set_session_archived(id, false).unwrap());
+        assert!(!manager.set_session_archived(id, false).unwrap());
+        assert_eq!(manager.tiling.pane_order(), [id]);
+        let restored = manager.focused_terminal().unwrap();
+        assert_eq!(restored.id, id);
+        assert!(restored.is_alive());
+        assert!(contains_history(restored));
+        assert!(manager.sessions_payload().archived.is_empty());
     }
 
     #[test]
@@ -4720,6 +4950,7 @@ mod tests {
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         let mut manager = SessionManager::new(cwd, Arc::clone(&notify));
         let tile = manager.open_tile(false, project.clone());
+        assert!(manager.toggle_maximize());
         let id = manager.allocate_session_id();
         let (program, args) = platform::echo_command("icy-prompt");
         let terminal = Session::spawn_command(
@@ -4735,12 +4966,41 @@ mod tests {
         .unwrap();
         assert_eq!(manager.place_session(terminal, false), id);
         assert_eq!(manager.tiling.pane_order(), [tile, id]);
+        assert!(manager.tiling.snapshot().maximized);
         assert_eq!(manager.workspace_dir(), project);
         assert!(manager.focused_terminal().is_some());
         assert!(manager.visible_screens().contains_key(&id.to_string()));
         assert!(manager.close_session(id));
         assert_eq!(manager.tiling.pane_order(), [tile]);
         assert!(manager.visible_screens().is_empty());
+    }
+
+    #[test]
+    fn new_terminals_start_at_the_destination_grid_size() {
+        let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut manager = SessionManager::new(cwd.clone(), Arc::new(|| {}));
+        manager.tiling = Workspaces::empty(TilingMode::Niri);
+        manager.config.font_size = 13;
+        let first = manager.open_tile(false, cwd.clone());
+        let next = manager.next_id;
+        let full = manager.new_terminal_size(next, false);
+        let stacked = manager.new_terminal_size(next, true);
+        assert!(
+            stacked.1 < full.1,
+            "stacking must account for a shorter pane"
+        );
+
+        assert!(manager.tiling.adjust_column_width(-0.25));
+        manager.apply_tiled_sizes();
+        let wide = manager.new_terminal_size(next, false);
+        assert!(
+            wide.0 > manager.cols,
+            "new column is wider than the focused column"
+        );
+        assert_eq!(manager.active_id(), first, "sizing must not mutate focus");
+
+        assert!(manager.toggle_maximize());
+        assert_eq!(manager.new_terminal_size(next, false), (130, 39));
     }
 
     #[test]
@@ -4887,13 +5147,14 @@ mod tests {
         );
 
         let dialog = frame(&mut host);
-        assert!(
-            text_rect(&dialog, "open folder").is_some(),
-            "the launcher's key hints"
-        );
+        assert!(text_rect(&dialog, "Search agents or terminal").is_some());
         assert!(host.focused(), "the dialog should focus its search field");
-        // Step 1 picks the folder; its action moves on to the agent step.
-        let choose = |frame: &Frame| text_rect(frame, "Choose agent").expect("folder step action");
+        click(&mut host, dialog_text(&dialog, "Terminal"));
+        let folder = frame(&mut host);
+        assert!(text_rect(&folder, "Browse").is_some());
+        assert!(host.focused(), "the folder path should receive focus");
+        let choose =
+            |frame: &Frame| text_rect(frame, "Open Terminal").expect("folder confirmation");
         // A typed path naming a file lists no folder; choosing validates it as one.
         host.edit(&[
             EditorEvent::SelectAll,
@@ -4942,13 +5203,9 @@ mod tests {
         let selected = frame(&mut host);
         assert!(text_rect(&selected, "No subfolders").is_some());
         click(&mut host, choose(&selected));
-        // Step 2: the agent list; a plain shell, not the preselected agent.
-        let agents = frame(&mut host);
-        assert!(text_rect(&agents, "Filter agents…").is_some());
-        assert!(selected_rx.try_recv().is_err());
-        click(&mut host, dialog_text(&agents, "Shell"));
         let opened = frame(&mut host);
-        assert!(text_rect(&opened, "open folder").is_none());
+        assert!(text_rect(&opened, "Open Terminal").is_none());
+        assert!(!host.focused());
         assert_eq!(selected_rx.try_recv().unwrap(), next);
 
         let mut tiling = Workspaces::new(1, TilingMode::Niri);

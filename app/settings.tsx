@@ -678,7 +678,7 @@ function SettingsView(): Element {
                   ))}
                 </Row>
               );
-              const groups = ["Views", "Sessions & tabs", "Windows", "Workspaces", "Layout", "Editor"];
+              const groups = ["Sessions & tabs", "Windows", "Views", "Focus", "Move", "Workspaces", "Columns & sizing", "Editor"];
               return (
                 <Column style={{ gap: settingsLayout.sectionGap }}>
                   <Show when={() => keybindNotice.value.length > 0}

@@ -55,40 +55,40 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Next tab",
         group: "Sessions & tabs",
         description: "Focuses the next session tab.",
-        defaults: &["Ctrl+Tab"],
+        defaults: &["Ctrl+Tab", "Ctrl+PageDown"],
     },
     ActionDef {
         id: "tab.prev",
         label: "Previous tab",
         group: "Sessions & tabs",
         description: "Focuses the previous session tab.",
-        defaults: &["Ctrl+Shift+Tab"],
+        defaults: &["Ctrl+Shift+Tab", "Ctrl+PageUp"],
     },
     ActionDef {
         id: "focus.left",
         label: "Focus left",
-        group: "Sessions & tabs",
+        group: "Focus",
         description: "Moves focus to the column on the left.",
         defaults: &["Alt+Left", "Alt+H"],
     },
     ActionDef {
         id: "focus.right",
         label: "Focus right",
-        group: "Sessions & tabs",
+        group: "Focus",
         description: "Moves focus to the column on the right.",
         defaults: &["Alt+Right", "Alt+L"],
     },
     ActionDef {
         id: "focus.up",
         label: "Focus up",
-        group: "Sessions & tabs",
+        group: "Focus",
         description: "Moves focus to the pane above.",
         defaults: &["Alt+Up", "Alt+K"],
     },
     ActionDef {
         id: "focus.down",
         label: "Focus down",
-        group: "Sessions & tabs",
+        group: "Focus",
         description: "Moves focus to the pane below.",
         defaults: &["Alt+Down", "Alt+J"],
     },
@@ -97,14 +97,14 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Focus view",
         group: "Views",
         description: "Keeps the active tab full screen in this workspace. Press again to return to the grid.",
-        defaults: &["Ctrl+Shift+M"],
+        defaults: &["Ctrl+Shift+M", "Alt+Shift+F"],
     },
     ActionDef {
         id: "view.overview",
         label: "Overview",
         group: "Views",
         description: "All sessions as live thumbnails.",
-        defaults: &["Ctrl+Alt+G"],
+        defaults: &["Alt+O"],
     },
     // Ids keep their old `panel.*` names so saved overrides still apply.
     ActionDef {
@@ -112,112 +112,113 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Open launcher",
         group: "Windows",
         description: "Choose a session, tool, file or URL in the launcher.",
-        defaults: &["Ctrl+Alt+B"],
+        defaults: &["Ctrl+Shift+P"],
     },
     ActionDef {
         id: "panel.files",
         label: "Files window",
         group: "Windows",
         description: "The workspace tree as a window of the tiling.",
-        defaults: &["Ctrl+Alt+E"],
+        defaults: &["Ctrl+Shift+E"],
     },
     ActionDef {
         id: "panel.overview",
         label: "Overview window",
         group: "Windows",
         description: "Review, files and sessions summary as a window of the tiling.",
-        defaults: &["Ctrl+Alt+O"],
+        defaults: &["Ctrl+Shift+G"],
     },
     ActionDef {
         id: "layout.wider",
         label: "Wider",
-        group: "Layout",
+        group: "Columns & sizing",
         description: "Moves the focused column's right border.",
         defaults: &["Ctrl+Alt+Right"],
     },
     ActionDef {
         id: "layout.narrower",
         label: "Narrower",
-        group: "Layout",
+        group: "Columns & sizing",
         description: "Moves the focused column's border back.",
         defaults: &["Ctrl+Alt+Left"],
     },
     ActionDef {
         id: "layout.taller",
         label: "Taller",
-        group: "Layout",
+        group: "Columns & sizing",
         description: "Grows the focused pane in its column.",
         defaults: &["Ctrl+Alt+Down"],
     },
     ActionDef {
         id: "layout.shorter",
         label: "Shorter",
-        group: "Layout",
+        group: "Columns & sizing",
         description: "Shrinks the focused pane in its column.",
         defaults: &["Ctrl+Alt+Up"],
     },
     ActionDef {
         id: "layout.cycleWidth",
         label: "Preset width",
-        group: "Layout",
+        group: "Columns & sizing",
         description: "Cycles the focused column through ⅓ · ½ · ⅔.",
         defaults: &["Ctrl+Alt+R"],
     },
     ActionDef {
         id: "layout.maximizeColumn",
-        label: "Expand column",
-        group: "Layout",
-        description: "In Niri, gives the focused column the full width while keeping its panes stacked.",
-        defaults: &[],
+        label: "Maximize column",
+        group: "Columns & sizing",
+        description: "In Niri, gives the focused column the full width with its gaps. Press again to restore its width.",
+        // niri `Mod+F`; icy's Mod is Alt, as in Alt+H/J/K/L.
+        defaults: &["Alt+F"],
     },
     ActionDef {
         id: "layout.center",
         label: "Center column",
-        group: "Layout",
+        group: "Columns & sizing",
         description: "Centers the focused column in the scrollable workspace.",
         defaults: &["Ctrl+Alt+C"],
     },
     ActionDef {
         id: "layout.moveLeft",
         label: "Move column left",
-        group: "Layout",
+        group: "Move",
         description: "Swaps the focused column with the one on its left.",
-        defaults: &["Alt+Shift+Left", "Ctrl+Alt+Shift+Left"],
+        defaults: &["Alt+Shift+Left", "Alt+Shift+H"],
     },
     ActionDef {
         id: "layout.moveRight",
         label: "Move column right",
-        group: "Layout",
+        group: "Move",
         description: "Swaps the focused column with the one on its right.",
-        defaults: &["Alt+Shift+Right", "Ctrl+Alt+Shift+Right"],
+        defaults: &["Alt+Shift+Right", "Alt+Shift+L"],
     },
     ActionDef {
         id: "layout.moveUp",
         label: "Move pane up",
-        group: "Layout",
+        group: "Move",
         description: "Swaps the focused pane with the one above it.",
-        defaults: &["Alt+Shift+Up"],
+        defaults: &["Alt+Shift+Up", "Alt+Shift+K"],
     },
     ActionDef {
         id: "layout.moveDown",
         label: "Move pane down",
-        group: "Layout",
+        group: "Move",
         description: "Swaps the focused pane with the one below it.",
-        defaults: &["Alt+Shift+Down"],
+        defaults: &["Alt+Shift+Down", "Alt+Shift+J"],
     },
     ActionDef {
         id: "layout.consumeLeft",
         label: "Consume / expel left",
-        group: "Layout",
+        group: "Move",
         description: "Moves the focused pane into or out of the column on its left.",
-        defaults: &["Ctrl+Alt+,"],
+        defaults: &["Ctrl+Alt+Shift+Left"],
     },
     ActionDef {
         id: "layout.consumeRight",
         label: "Consume / expel right",
-        group: "Layout",
+        group: "Move",
         description: "Moves the focused pane into or out of the column on its right.",
-        defaults: &["Ctrl+Alt+."],
+        defaults: &["Ctrl+Alt+Shift+Right"],
     },
     // niri `focus-workspace-down/up` and `move-window-to-workspace-down/up`.
     ActionDef {
@@ -225,96 +226,103 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Next workspace",
         group: "Workspaces",
         description: "The workspace below (the last one is always empty).",
-        defaults: &["Ctrl+Alt+PageDown"],
+        defaults: &["Alt+PageDown", "Alt+U"],
     },
     ActionDef {
         id: "workspace.up",
         label: "Previous workspace",
         group: "Workspaces",
         description: "The workspace above.",
-        defaults: &["Ctrl+Alt+PageUp"],
+        defaults: &["Alt+PageUp", "Alt+I"],
+    },
+    ActionDef {
+        id: "workspace.switcher",
+        label: "Switch workspace",
+        group: "Workspaces",
+        description: "Lists every workspace to search and jump to one.",
+        defaults: &["Alt+W"],
     },
     ActionDef {
         id: "workspace.moveDown",
         label: "Move window down",
         group: "Workspaces",
         description: "The focused window to the workspace below; focus follows it.",
-        defaults: &["Ctrl+Alt+Shift+PageDown"],
+        defaults: &["Alt+Shift+PageDown", "Alt+Shift+U"],
     },
     ActionDef {
         id: "workspace.moveUp",
         label: "Move window up",
         group: "Workspaces",
         description: "The focused window to the workspace above (a new one on top from the first).",
-        defaults: &["Ctrl+Alt+Shift+PageUp"],
+        defaults: &["Alt+Shift+PageUp", "Alt+Shift+I"],
     },
     ActionDef {
         id: "layout.cycleWidthBack",
         label: "Previous preset width",
-        group: "Layout",
+        group: "Columns & sizing",
         description: "Cycles the preset column widths backwards (2/3 → 1/2 → 1/3).",
         defaults: &["Ctrl+Alt+Shift+R"],
     },
     ActionDef {
         id: "layout.focusFirst",
         label: "Focus first column",
-        group: "Layout",
+        group: "Focus",
         description: "Jumps to the first column of the strip.",
         defaults: &["Alt+Home"],
     },
     ActionDef {
         id: "layout.focusLast",
         label: "Focus last column",
-        group: "Layout",
+        group: "Focus",
         description: "Jumps to the last column of the strip.",
         defaults: &["Alt+End"],
     },
     ActionDef {
         id: "layout.moveFirst",
         label: "Move column to start",
-        group: "Layout",
+        group: "Move",
         description: "Moves the focused column to the start of the strip.",
         defaults: &["Alt+Shift+Home"],
     },
     ActionDef {
         id: "layout.moveLast",
         label: "Move column to end",
-        group: "Layout",
+        group: "Move",
         description: "Moves the focused column to the end of the strip.",
         defaults: &["Alt+Shift+End"],
     },
     ActionDef {
         id: "layout.swapLeft",
         label: "Swap window left",
-        group: "Layout",
+        group: "Move",
         description: "Trades the focused window with the one focused in the column on its left.",
         defaults: &[],
     },
     ActionDef {
         id: "layout.swapRight",
         label: "Swap window right",
-        group: "Layout",
+        group: "Move",
         description: "Trades the focused window with the one focused in the column on its right.",
         defaults: &[],
     },
     ActionDef {
         id: "layout.consumeInto",
         label: "Consume into column",
-        group: "Layout",
+        group: "Move",
         description: "Pulls the next column's first window into the bottom of this column.",
-        defaults: &["Ctrl+Alt+["],
+        defaults: &["Ctrl+Alt+,"],
     },
     ActionDef {
         id: "layout.expelFrom",
         label: "Expel from column",
-        group: "Layout",
+        group: "Move",
         description: "Pushes this column's last window out as a new column on its right.",
-        defaults: &["Ctrl+Alt+]"],
+        defaults: &["Ctrl+Alt+."],
     },
     ActionDef {
         id: "layout.expandColumn",
         label: "Expand to available width",
-        group: "Layout",
+        group: "Columns & sizing",
         description: "Grows the focused column into the space the other visible columns leave.",
         defaults: &["Ctrl+Alt+F"],
     },
@@ -330,33 +338,33 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Move column down",
         group: "Workspaces",
         description: "Moves the whole focused column to the workspace below; focus follows it.",
-        defaults: &[],
+        defaults: &["Ctrl+Alt+PageDown", "Ctrl+Alt+U"],
     },
     ActionDef {
         id: "workspace.moveColumnUp",
         label: "Move column up",
         group: "Workspaces",
         description: "Moves the whole focused column to the workspace above; focus follows it.",
-        defaults: &[],
+        defaults: &["Ctrl+Alt+PageUp", "Ctrl+Alt+I"],
     },
     ActionDef {
         id: "focus.windowOrWorkspaceDown",
         label: "Focus down or next workspace",
-        group: "Workspaces",
+        group: "Focus",
         description: "Moves focus down the column, then to the workspace below.",
         defaults: &[],
     },
     ActionDef {
         id: "focus.windowOrWorkspaceUp",
         label: "Focus up or previous workspace",
-        group: "Workspaces",
+        group: "Focus",
         description: "Moves focus up the column, then to the workspace above.",
         defaults: &[],
     },
     ActionDef {
         id: "layout.reset",
         label: "Reset sizes",
-        group: "Layout",
+        group: "Columns & sizing",
         description: "Equal columns and panes.",
         defaults: &["Ctrl+Alt+0"],
     },
@@ -642,6 +650,18 @@ mod tests {
         assert_eq!(map.resolve(&chord("Ctrl+Left")), None);
         assert_eq!(map.resolve(&chord("Alt+Shift+Up")), Some("layout.moveUp"));
         assert_eq!(map.resolve(&chord("Ctrl+L")), Some("editor.addToChat"));
+        // Alt is the app's Mod: plain focuses, Shift moves, Ctrl sizes; U/I walk workspaces.
+        assert_eq!(map.resolve(&chord("Alt+Shift+H")), Some("layout.moveLeft"));
+        assert_eq!(map.resolve(&chord("Alt+U")), Some("workspace.down"));
+        assert_eq!(map.resolve(&chord("Alt+Shift+I")), Some("workspace.moveUp"));
+        assert_eq!(
+            map.resolve(&chord("Ctrl+Alt+U")),
+            Some("workspace.moveColumnDown")
+        );
+        assert_eq!(
+            map.resolve(&chord("Ctrl+Alt+,")),
+            Some("layout.consumeInto")
+        );
 
         let taken = assign(
             &mut overrides,
@@ -652,7 +672,7 @@ mod tests {
         assert_eq!(taken, vec!["New session"]);
         let map = Keymap::new(&overrides);
         assert_eq!(map.resolve(&chord("Ctrl+Shift+T")), Some("view.overview"));
-        assert_eq!(map.resolve(&chord("Ctrl+Alt+G")), None);
+        assert_eq!(map.resolve(&chord("Alt+O")), None);
         assert!(effective(&overrides, "session.new").is_empty());
 
         reset(&mut overrides, "session.new");
@@ -675,6 +695,6 @@ mod tests {
         let overrides = Overrides::from([("view.overview".into(), vec!["Alt+Shift+Up".into()])]);
         let map = Keymap::new(&overrides);
         assert_eq!(map.resolve(&chord("Alt+Shift+Up")), Some("view.overview"));
-        assert!(effective(&overrides, "layout.moveUp").is_empty());
+        assert_eq!(effective(&overrides, "layout.moveUp"), vec!["Alt+Shift+K"]);
     }
 }

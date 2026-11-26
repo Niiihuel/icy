@@ -1,13 +1,16 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod browser;
+mod desktop_notifications;
 mod font_preview;
 mod icons;
 mod pixel_blast;
 mod release_glow;
 #[cfg(test)]
 mod review_tests;
+mod usage_scan;
 mod window;
+mod window_surface;
 
 use std::borrow::Cow;
 use std::cell::OnceCell;
@@ -18,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use icy_core::agent_notifications::AgentNotifications;
 use icy_core::config::{self, IcyConfig, ResolvedTheme};
 use icy_core::document;
 use icy_core::git::{self, ChangeSet, DiffLine};
@@ -43,7 +47,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::window::{Pusher, TerminalSelect, WindowHooks, WindowShortcut};
-use icy_core::usage::CliUsage;
+use icy_core::usage::{CliUsage, UsageSnapshot};
+use usage_scan::UsageScan;
 
 const APP: &str = include_str!(concat!(env!("OUT_DIR"), "/app.js"));
 const GEIST_MONO_TTF: &[u8] = include_bytes!("../../../assets/fonts/GeistMono-Regular.ttf");
@@ -614,8 +619,13 @@ struct ThemesPayload {
 enum BridgeEvent {
     Hello,
     TerminalFrameReceived(u64),
-    ScanUsage(mpsc::Sender<BridgeEvent>),
-    UsageReady(icy_core::usage::UsageSnapshot),
+    ScanUsage {
+        tx: mpsc::Sender<BridgeEvent>,
+        refresh: bool,
+    },
+    UsageReady(Arc<UsageSnapshot>),
+    TestNotification(mpsc::Sender<BridgeEvent>),
+    NotificationTested(Option<String>),
     /// Fresh sidebar meters from the periodic `icy-cli-usage` scan.
     CliUsage(Vec<CliUsage>),
     PtyDirty,
@@ -2438,7 +2448,16 @@ fn handle_request(
             Ok("ok".into())
         }
         "scanUsage" => {
-            let _ = tx.send(BridgeEvent::ScanUsage(tx.clone()));
+            tx.send(BridgeEvent::ScanUsage {
+                tx: tx.clone(),
+                refresh: payload["refresh"].as_bool().unwrap_or(true),
+            })
+            .map_err(|error| error.to_string())?;
+            Ok("ok".into())
+        }
+        "testNotification" => {
+            tx.send(BridgeEvent::TestNotification(tx.clone()))
+                .map_err(|error| error.to_string())?;
             Ok("ok".into())
         }
         "saveEditor" => {
@@ -2895,6 +2914,9 @@ fn handle_request(
         }
         "updateConfig" => {
             let mut guard = manager.lock().unwrap();
+            if let Some(value) = payload.get("windowTransparency").and_then(Value::as_i64) {
+                guard.config.window_transparency = config::window_transparency_percent(value);
+            }
             if let Some(theme) = payload.get("theme").and_then(Value::as_str) {
                 guard.config.theme = theme.into();
                 if let Some(found) = guard.themes.iter().find(|t| t.id == theme) {
@@ -2937,6 +2959,18 @@ fn handle_request(
             }
             if let Some(auto_r) = payload.get("autoRestartUpdate").and_then(Value::as_bool) {
                 guard.config.auto_restart_update = auto_r;
+            }
+            if let Some(notifications) = payload.get("agentNotifications") {
+                let prefs = &mut guard.config.agent_notifications;
+                if let Some(value) = notifications["finished"].as_bool() {
+                    prefs.finished = value;
+                }
+                if let Some(value) = notifications["needsInput"].as_bool() {
+                    prefs.needs_input = value;
+                }
+                if let Some(value) = notifications["backgroundOnly"].as_bool() {
+                    prefs.background_only = value;
+                }
             }
             let _ = config::save_config(&guard.config);
             let _ = tx.send(BridgeEvent::ConfigDirty);
@@ -3444,6 +3478,7 @@ fn run_bridge(
     pusher: Pusher,
     rx: mpsc::Receiver<BridgeEvent>,
     manager: Arc<Mutex<SessionManager>>,
+    usage_scan: Arc<UsageScan>,
 ) {
     let mut cli_usage: Vec<CliUsage> = Vec::new();
     let mut last_screen_push = Instant::now() - SCREEN_FRAME_MIN_INTERVAL;
@@ -3462,13 +3497,19 @@ fn run_bridge(
     let mut previous_sessions = None;
     let mut next_status_refresh = Instant::now();
     let mut status_dirty = false;
+    let mut agent_notifications = AgentNotifications::default();
+    let mut desktop_notifications = desktop_notifications::Delivery::default();
     // A program can begin a synchronized redraw without sending the closing marker (for
     // instance if it is interrupted). vte's deadline must be driven even when no bytes arrive.
     let mut sync_deadline: Option<Instant> = None;
 
     loop {
         let status_deadline = status_dirty.then_some(next_status_refresh);
-        let deadline = sync_deadline.into_iter().chain(status_deadline).min();
+        let deadline = sync_deadline
+            .into_iter()
+            .chain(status_deadline)
+            .chain(agent_notifications.deadline())
+            .min();
         let event = if let Some(deadline) = deadline {
             rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
         } else {
@@ -3494,6 +3535,7 @@ fn run_bridge(
         let mut need_usage = false;
         let mut scan_usage = None;
         let mut usage_ready = None;
+        let mut test_notification = None;
         let mut need_config = false;
         let mut need_themes = false;
         let mut need_editors = false;
@@ -3531,8 +3573,12 @@ fn run_bridge(
                     pending_frame = None;
                 }
             }
-            BridgeEvent::ScanUsage(tx) => scan_usage = Some(tx),
+            BridgeEvent::ScanUsage { tx, refresh } => scan_usage = Some((tx, refresh)),
             BridgeEvent::UsageReady(snapshot) => usage_ready = Some(snapshot),
+            BridgeEvent::TestNotification(tx) => test_notification = Some(tx),
+            BridgeEvent::NotificationTested(error) => {
+                push_view(&pusher, "notificationTest", &error)
+            }
             BridgeEvent::CliUsage(list) => {
                 need_usage = list != cli_usage;
                 cli_usage = list;
@@ -3708,22 +3754,34 @@ fn run_bridge(
             push_view(&pusher, "metricsUsage", &snapshot);
             scan_usage = None;
         }
-        if let Some(tx) = scan_usage
+        if let Some((tx, refresh)) = scan_usage
             && !scanning_usage
         {
+            let usage_scan = Arc::clone(&usage_scan);
             scanning_usage = std::thread::Builder::new()
                 .name("icy-usage".into())
                 .spawn(move || {
-                    let _ = tx.send(BridgeEvent::UsageReady(icy_core::usage::collect_local()));
+                    let max_age = if refresh {
+                        Duration::ZERO
+                    } else {
+                        CLI_USAGE_REFRESH
+                    };
+                    let _ = tx.send(BridgeEvent::UsageReady(usage_scan.snapshot(max_age)));
                 })
                 .is_ok();
             if !scanning_usage {
                 push_view(&pusher, "metricsUsageError", &());
             }
         }
+        if let Some(tx) = test_notification
+            && let Err(error) =
+                desktop_notifications.send(desktop_notifications::test_notice(), Some(tx))
+        {
+            push_view(&pusher, "notificationTest", &Some(error.to_string()));
+        }
         if need_config {
             let cfg = manager.lock().unwrap().config.clone();
-            push_view(&pusher, "config", &cfg);
+            pusher.config(&cfg);
         }
         if need_themes {
             let themes = manager.lock().unwrap().themes_payload();
@@ -3765,35 +3823,53 @@ fn run_bridge(
         }
         // PTY output can redraw at frame rate. Agent detection and process metadata only need a
         // periodic refresh, including a final refresh after the output goes quiet.
-        need_sessions |= status_dirty && Instant::now() >= next_status_refresh;
+        let now = Instant::now();
+        need_sessions |= (status_dirty && now >= next_status_refresh)
+            || agent_notifications.deadline().is_some_and(|due| now >= due);
         if need_tiling || need_sessions {
             status_dirty = false;
-            next_status_refresh = Instant::now() + SESSION_STATUS_INTERVAL;
-        }
-        if need_tiling {
-            let (sessions, tiling, root) = {
+            next_status_refresh = now + SESSION_STATUS_INTERVAL;
+            let (sessions, updated_layout, notices) = {
                 let guard = manager.lock().unwrap();
-                guard.save_terminal_layout();
-                (
-                    guard.sessions_payload(),
-                    guard.tiling_snapshot(),
-                    guard.workspace_dir().to_path_buf(),
-                )
+                let updated_layout = need_tiling.then(|| {
+                    guard.save_terminal_layout();
+                    (guard.tiling_snapshot(), guard.workspace_dir().to_path_buf())
+                });
+                let sessions = guard.sessions_payload();
+                let preferences = guard.config.agent_notifications;
+                let notices = if preferences.finished || preferences.needs_input {
+                    let focused = pusher.focused().then_some(sessions.active_id);
+                    agent_notifications
+                        .observe(&sessions.items, Instant::now())
+                        .into_iter()
+                        .filter(|(session, notice)| {
+                            preferences.allows(*notice, focused == Some(session.id))
+                        })
+                        .map(|(session, notice)| {
+                            desktop_notifications::agent_notice(session, notice, &guard.config.clis)
+                        })
+                        .collect()
+                } else {
+                    agent_notifications = AgentNotifications::default();
+                    Vec::new()
+                };
+                (sessions, updated_layout, notices)
             };
+            for notice in notices {
+                if let Err(error) = desktop_notifications.send(notice, None) {
+                    eprintln!("icy: cannot queue desktop notification: {error}");
+                }
+            }
             if previous_sessions.as_ref() != Some(&sessions) {
                 push_view(&pusher, "sessions", &sessions);
                 previous_sessions = Some(sessions);
             }
-            push_view(&pusher, "tiling", &tiling);
-            if workspace.as_ref() != Some(&root) {
-                push_view(&pusher, "workspace", &root);
-                workspace = Some(root);
-            }
-        } else if need_sessions {
-            let sessions = manager.lock().unwrap().sessions_payload();
-            if previous_sessions.as_ref() != Some(&sessions) {
-                push_view(&pusher, "sessions", &sessions);
-                previous_sessions = Some(sessions);
+            if let Some((tiling, root)) = updated_layout {
+                push_view(&pusher, "tiling", &tiling);
+                if workspace.as_ref() != Some(&root) {
+                    push_view(&pusher, "workspace", &root);
+                    workspace = Some(root);
+                }
             }
         }
         for files in pending_files {
@@ -3994,31 +4070,10 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| PathBuf::from("."));
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let (tx, rx) = mpsc::channel();
-    // Limits move while agents run, so the sidebar meters rescan in the background; the loop ends
-    // with the bridge (send fails once the receiver is gone).
-    let usage_tx = tx.clone();
-    let _ = std::thread::Builder::new()
-        .name("icy-cli-usage".into())
-        .spawn(move || {
-            // Local data first (instant meters), then live limits on their slower cadence.
-            let mut remote = Vec::new();
-            let mut remote_at: Option<Instant> = None;
-            loop {
-                if usage_tx
-                    .send(BridgeEvent::CliUsage(icy_core::usage::collect_cli(&remote)))
-                    .is_err()
-                {
-                    break;
-                }
-                if remote_at.is_none_or(|at| at.elapsed() >= REMOTE_LIMITS_REFRESH) {
-                    remote = icy_core::usage::fetch_remote_limits();
-                    remote_at = Some(Instant::now());
-                    continue;
-                }
-                std::thread::sleep(CLI_USAGE_REFRESH);
-            }
-        });
-
+    let usage_scan = Arc::new(UsageScan::default());
+    if offscreen_path.is_none() {
+        usage_scan::spawn_sidebar(Arc::clone(&usage_scan), tx.clone());
+    }
     let pty_tx = tx.clone();
     let on_pty_update: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let _ = pty_tx.send(BridgeEvent::PtyDirty);
@@ -4052,10 +4107,11 @@ fn main() -> ExitCode {
     install_images_on_host(&mut host, 1.0);
 
     if let Some(path) = offscreen_path {
+        let snapshot = icy_core::usage::collect_local();
         return run_offscreen(
             &path,
             &manager,
-            &icy_core::usage::collect_cli(&Vec::new()),
+            &icy_core::usage::collect_cli(&snapshot, &Vec::new()),
             &cwd,
             host,
         );
@@ -4208,13 +4264,14 @@ fn main() -> ExitCode {
 
     let bridge_manager = Arc::clone(&manager);
     let scale_tx = tx.clone();
-    let result = window::open_with(host, "icy", [1280, 800], hooks, |pusher| {
+    let initial_config = manager.lock().unwrap().config.clone();
+    let result = window::open_with(host, "icy", [1280, 800], &initial_config, hooks, |pusher| {
         pusher.on_scale(move |scale| {
             let _ = scale_tx.send(BridgeEvent::ScaleChanged(scale));
         });
         std::thread::Builder::new()
             .name("icy-ui-bridge".into())
-            .spawn(move || run_bridge(pusher, rx, bridge_manager))
+            .spawn(move || run_bridge(pusher, rx, bridge_manager, usage_scan))
             .expect("spawn ui bridge thread");
     });
     manager.lock().unwrap().save_terminal_layout();
@@ -4244,6 +4301,76 @@ mod tests {
         host.poll();
         let frame = host.frame(1280., 800., 1., 4096);
         assert!(!frame.items.is_empty(), "expected mounted UI scene items");
+    }
+
+    #[test]
+    fn appearance_controls_change_the_native_background_preference() {
+        use jsnir::editor::PointSelection;
+        use jsnir::host::{Frame, Item};
+        use serde_json::json;
+
+        fn frame(host: &mut Host) -> Frame {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                host.poll();
+                let frame = host.frame(1280., 800., 1., 4096);
+                if (!host.busy() && !frame.animating) || Instant::now() >= deadline {
+                    return frame;
+                }
+                std::thread::sleep(Duration::from_millis(4));
+            }
+        }
+
+        fn backdrop(frame: &Frame) -> u8 {
+            frame
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    Item::Fill { rect, top, .. } if *rect == [0., 0., 1280., 800.] => Some(top[3]),
+                    _ => None,
+                })
+                .expect("window backdrop")
+        }
+
+        let (requests, received) = mpsc::channel();
+        let script = format!("{APP}\nactiveNav.value = 'settings';");
+        let mut host =
+            Host::with_request_handler(script, "{}".into(), TextEngine::default(), move |raw| {
+                let request: Value = serde_json::from_str(&raw).unwrap();
+                if request["type"] == "updateConfig" {
+                    requests
+                        .send(request["windowTransparency"].clone())
+                        .unwrap();
+                }
+                Ok("ok".into())
+            })
+            .unwrap();
+        install_fonts(&mut host);
+        host.push(json!({"view": "windowTransparencySupport", "data": true}).to_string());
+        let solid = frame(&mut host);
+        assert_eq!(backdrop(&solid), 255);
+        let rect = solid
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text { rect, text, .. } if text == "+" => Some(rect),
+                _ => None,
+            })
+            .expect("increase background transparency");
+        host.pointer_move(Some([rect[0] + rect[2] / 2., rect[1] + rect[3] / 2.]));
+        host.pointer_down(PointSelection::Place);
+        host.pointer_up();
+        frame(&mut host);
+        assert_eq!(received.try_recv().unwrap(), 5);
+
+        let config = IcyConfig {
+            window_transparency: 65,
+            ..IcyConfig::default()
+        };
+        host.push(json!({"view": "config", "data": config}).to_string());
+        assert_eq!(backdrop(&frame(&mut host)), 89);
+        host.push(json!({"view": "windowTransparencySupport", "data": false}).to_string());
+        assert_eq!(backdrop(&frame(&mut host)), 255);
     }
 
     #[test]
@@ -5290,6 +5417,92 @@ mod tests {
         let added = frame(&mut host);
         assert!(text_rect(&added, "Add project").is_none());
         assert_eq!(added_rx.try_recv().unwrap(), worker);
+    }
+
+    #[test]
+    fn metrics_loading_keeps_the_dashboard_geometry_and_stops_animating() {
+        use jsnir::editor::PointSelection;
+        use jsnir::host::{Frame, Item};
+        use serde_json::json;
+
+        fn label(frame: &Frame, label: &str) -> Option<[f32; 4]> {
+            frame.items.iter().find_map(|item| match item {
+                Item::Text { text, rect, .. } if text == label => Some(*rect),
+                _ => None,
+            })
+        }
+
+        for width in [1280., 480.] {
+            let (requests, received) = mpsc::channel();
+            let mut host = Host::with_request_handler(
+                format!("{APP}\nmount(MetricsView);"),
+                "{}".into(),
+                TextEngine::default(),
+                move |raw| {
+                    let request: Value = serde_json::from_str(&raw).unwrap();
+                    if request["type"] == "scanUsage" {
+                        requests.send(request["refresh"].clone()).unwrap();
+                    }
+                    Ok("ok".into())
+                },
+            )
+            .unwrap();
+            install_fonts(&mut host);
+            const REFRESH_ICON: [u8; 4] = [1, 2, 3, 255];
+            host.set_image("glyph:refresh".into(), REFRESH_ICON.to_vec(), [1, 1]);
+            host.push(json!({ "view": "config", "data": IcyConfig::default() }).to_string());
+
+            let wait_for = |host: &mut Host, text| {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    host.poll();
+                    let frame = host.frame(width, 1800., 1., 4096);
+                    if !frame.animating && label(&frame, text).is_some() {
+                        break frame;
+                    }
+                    assert!(Instant::now() < deadline, "missing settled label {text:?}");
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+            };
+
+            let skeleton = wait_for(&mut host, "Token volume");
+            assert_eq!(received.try_recv().unwrap(), false);
+            assert!(label(&skeleton, "Input tokens").is_none());
+
+            host.push(
+                json!({
+                    "view": "metricsUsage", "data": { "today": 20_000, "agents": [] }
+                })
+                .to_string(),
+            );
+            let ready = wait_for(&mut host, "Input tokens");
+            for section in ["Token volume", "Peak activity", "Agents", "Models"] {
+                let before =
+                    label(&skeleton, section).unwrap_or_else(|| panic!("skeleton {section}"));
+                let after = label(&ready, section).unwrap_or_else(|| panic!("loaded {section}"));
+                assert!(
+                    (before[1] - after[1]).abs() <= 1.,
+                    "{width}px, {section}: {before:?} -> {after:?}"
+                );
+            }
+
+            let [x, y, w, h] = ready
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    Item::Image { image, rect, .. } if image.rgba.as_ref() == REFRESH_ICON => {
+                        Some(*rect)
+                    }
+                    _ => None,
+                })
+                .expect("refresh control");
+            host.pointer_move(Some([x + w / 2., y + h / 2.]));
+            host.pointer_down(PointSelection::Place);
+            host.pointer_up();
+            let refreshing = wait_for(&mut host, "Refreshing local usage…");
+            assert_eq!(received.try_recv().unwrap(), true);
+            assert!(label(&refreshing, "Input tokens").is_some());
+        }
     }
 
     #[test]

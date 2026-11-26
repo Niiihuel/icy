@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+#[cfg(target_os = "linux")]
+mod background_blur;
+mod desktop_notifications;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -14,6 +17,32 @@ mod windows;
 use unix as os;
 #[cfg(windows)]
 use windows as os;
+
+pub use desktop_notifications::{DesktopNotification, DesktopNotifier};
+
+pub fn has_wayland_surface(window: &impl raw_window_handle::HasWindowHandle) -> bool {
+    window.window_handle().is_ok_and(|handle| {
+        matches!(
+            handle.as_raw(),
+            raw_window_handle::RawWindowHandle::Wayland(_)
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub use background_blur::WindowBackgroundBlur;
+
+#[cfg(not(target_os = "linux"))]
+pub struct WindowBackgroundBlur;
+
+#[cfg(not(target_os = "linux"))]
+impl WindowBackgroundBlur {
+    pub fn attach<W>(_window: std::sync::Arc<W>) -> Option<Self> {
+        None
+    }
+
+    pub fn set_enabled(&self, _enabled: bool) {}
+}
 
 /// The platform's standard text-editing shortcut modifier, excluding AltGr.
 pub fn editor_command_modifier(control: bool, alt: bool, super_key: bool) -> bool {

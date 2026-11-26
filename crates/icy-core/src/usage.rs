@@ -200,12 +200,11 @@ fn now_seconds() -> i64 {
         .as_secs() as i64
 }
 
-/// Sidebar meters for every tracked CLI: local transcripts plus the last live `remote` limits.
-pub fn collect_cli(remote: &RemoteLimits) -> Vec<CliUsage> {
+/// Sidebar meters for every tracked CLI: a shared local snapshot plus the last live limits.
+pub fn collect_cli(snapshot: &UsageSnapshot, remote: &RemoteLimits) -> Vec<CliUsage> {
     let now = now_seconds();
     let home = crate::platform::home_dir();
-    let snapshot = logs::collect(home.as_deref(), now / SECONDS_PER_DAY);
-    cli::collect(home.as_deref(), &snapshot, now, remote)
+    cli::collect(home.as_deref(), snapshot, now, remote)
 }
 
 /// Live limits (network / CLI calls); poll sparingly, the vendors rate-limit these endpoints.

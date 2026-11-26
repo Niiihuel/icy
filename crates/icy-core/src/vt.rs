@@ -375,7 +375,10 @@ impl VtEngine for AlacrittyVt {
             return status;
         }
         let mut tail = Vec::new();
-        if matches!(cli, "opencode" | "antigravity" | "grok" | "codex") {
+        if matches!(
+            cli,
+            "opencode" | "antigravity" | "grok" | "codex" | "claude" | "junie"
+        ) {
             let grid = self.term.grid();
             // Read live coordinates, not renderable_content(), which follows the user's scrollback.
             for row in (0..self.rows).rev().take(32) {
@@ -871,6 +874,28 @@ mod tests {
         assert_eq!(vt.agent_status("grok", "grok"), AgentStatus::Working);
         vt.feed(b"\x1b]9;4;0;0\x1b\\");
         assert_eq!(vt.agent_status("grok", "grok"), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn recognizes_claude_and_junie_approval_dialogs_in_live_terminal() {
+        let mut vt = AlacrittyVt::new(72, 8);
+        vt.feed(
+            b"\x1b[5;1HDo you want to proceed?\x1b[6;1H1. Yes\x1b[7;1H2. No\x1b[8;1HEsc to cancel",
+        );
+        assert_eq!(
+            vt.agent_status("claude", "Claude Code"),
+            AgentStatus::Blocked
+        );
+        assert_eq!(
+            vt.agent_status("terminal", "Claude Code"),
+            AgentStatus::Idle
+        );
+        vt.feed("\x1b[2J\x1b[8;1HWorking… esc to stop".as_bytes());
+        assert_eq!(vt.agent_status("junie", "Junie"), AgentStatus::Working);
+        vt.feed(b"\x1b[7;1HAllow once\x1b[8;1H\x1b[2KDeny");
+        assert_eq!(vt.agent_status("junie", "Junie"), AgentStatus::Blocked);
+        vt.feed(b"\x1b[2J\x1b[8;1H> ");
+        assert_eq!(vt.agent_status("junie", "Junie"), AgentStatus::Idle);
     }
 
     use super::*;

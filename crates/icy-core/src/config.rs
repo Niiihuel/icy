@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent_notifications::NotificationPreferences;
 use crate::platform;
 use crate::tiling::TilingMode;
 
@@ -30,12 +31,17 @@ pub struct IcyConfig {
     pub accent: String,
     pub density: String,
     pub font_size: u16,
+    /// Transparency of the native window background as a percentage (0 is solid).
+    #[serde(default, deserialize_with = "deserialize_window_transparency")]
+    pub window_transparency: u8,
     pub tiling_mode: TilingMode,
     /// niri layout options (default column width, center-focused-column, …).
     #[serde(default)]
     pub layout: crate::tiling::LayoutOptions,
     pub check_updates: bool,
     pub auto_restart_update: bool,
+    #[serde(default)]
+    pub agent_notifications: NotificationPreferences,
     pub clis: Vec<CliConfig>,
     /// Project folders pinned in the sidebar (Antigravity "Projects"); sessions group under them.
     #[serde(default)]
@@ -56,16 +62,29 @@ impl Default for IcyConfig {
             accent: "blue".into(),
             density: "comfortable".into(),
             font_size: 13,
+            window_transparency: 0,
             tiling_mode: TilingMode::Niri,
             layout: Default::default(),
             check_updates: true,
             auto_restart_update: true,
+            agent_notifications: NotificationPreferences::default(),
             clis: default_clis(),
             projects: Vec::new(),
             keybinds: Default::default(),
             preferred_editor: None,
         }
     }
+}
+
+pub fn window_transparency_percent(value: i64) -> u8 {
+    value.clamp(0, 100) as u8
+}
+
+fn deserialize_window_transparency<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u8, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(window_transparency_percent(value.as_i64().unwrap_or(0)))
 }
 
 pub fn default_clis() -> Vec<CliConfig> {
@@ -581,19 +600,42 @@ mod tests {
         let cfg_path = dir.join("config.json");
         let cfg = IcyConfig {
             density: "compact".into(),
+            window_transparency: 35,
+            agent_notifications: NotificationPreferences {
+                needs_input: true,
+                ..Default::default()
+            },
             preferred_editor: Some("cursor".into()),
             ..IcyConfig::default()
         };
         save_config_to(&cfg_path, &cfg).expect("save config");
         let loaded = load_config_from(&cfg_path);
         assert_eq!(loaded.density, "compact");
+        assert_eq!(loaded.window_transparency, 35);
+        assert_eq!(loaded.agent_notifications, cfg.agent_notifications);
         assert_eq!(loaded.preferred_editor.as_deref(), Some("cursor"));
 
-        // Older configs without preferredEditor still deserialize cleanly.
+        // Older configs load defaults for preferences introduced after they were saved.
         let mut raw_val = serde_json::to_value(&cfg).unwrap();
         raw_val.as_object_mut().unwrap().remove("preferredEditor");
-        let legacy: IcyConfig = serde_json::from_value(raw_val).unwrap();
+        raw_val
+            .as_object_mut()
+            .unwrap()
+            .remove("windowTransparency");
+        raw_val
+            .as_object_mut()
+            .unwrap()
+            .remove("agentNotifications");
+        let legacy: IcyConfig = serde_json::from_value(raw_val.clone()).unwrap();
         assert_eq!(legacy.preferred_editor, None);
+        assert_eq!(legacy.window_transparency, 0);
+        assert_eq!(
+            legacy.agent_notifications,
+            NotificationPreferences::default()
+        );
+        raw_val["windowTransparency"] = 150.into();
+        let clamped: IcyConfig = serde_json::from_value(raw_val).unwrap();
+        assert_eq!(clamped.window_transparency, 100);
 
         let themes = load_themes_from(&dir.join("themes"));
         assert!(themes.iter().any(|t| t.id == "accordee-dark"));

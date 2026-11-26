@@ -72,6 +72,10 @@ onHost(function (message: { view?: string; data?: any }) {
     themeAccent.value = cfg.accent;
     densityMode.value = cfg.density === "compact" ? "compact" : "comfortable";
     terminalFontSize.value = cfg.fontSize || 13;
+  } else if (message.view === "windowTransparencySupport") {
+    windowTransparencySupported.value = !!message.data;
+  } else if (message.view === "notificationTest") {
+    notificationTest.value = { pending: false, message: message.data ?? "Sent to your desktop." };
   } else if (message.view === "themes") {
     themesDirPath.value = message.data?.themesDir ?? "~/.config/icy/themes";
     themesList.value = message.data?.items ?? [];
@@ -186,7 +190,7 @@ function WorkspaceShell(): Element {
         <Box style={{ grow: 1, minWidth: 0, minHeight: 0, margin: [-stroke, 0, 0, 0], padding: stroke }}
           paint={() => framed() ? ({
             radius,
-            background: palette().appBg,
+            background: windowUnderlay(palette().appBg),
             edge: palette().border,
             edgeWidth: stroke,
           }) : {}}
@@ -211,7 +215,7 @@ function IcyApp(): Element {
   });
 
   return (
-    <Box style={{ grow: 1 }} paint={() => ({ background: palette().sidebarBg })}>
+    <Box style={{ grow: 1 }} paint={() => ({ background: windowBackdrop() })}>
       {/* minHeight: 0 keeps every shell pinned to the window so inner lists scroll. */}
       <Dynamic value={() => activeNav.value === "settings"} style={{ grow: 1, minHeight: 0 }}>
         {(settings) => (settings ? <SettingsShell /> : <WorkspaceShell />)}

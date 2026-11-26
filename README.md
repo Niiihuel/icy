@@ -17,6 +17,29 @@ Podés cerrar la ventana mientras un agente, una shell o un comando sigue trabaj
 
 El servidor de sesión es local y conserva las terminales mientras sigue en ejecución. `icy --stop-session-server` lo detiene y cierra sus terminales. Si reiniciás el equipo o se detiene el servidor, la recuperación de conversaciones depende de cada CLI.
 
+### Notificaciones de agentes
+
+En **Settings → CLIs & Agents → Desktop notifications** podés activar **Task completion** y **Approvals and questions** por separado. Con **Only for background sessions**, icy avisa por otros panes o cuando su ventana pierde el foco. Los avisos incluyen la CLI y la carpeta del proyecto y se entregan mientras icy está abierto, incluso minimizado. Usá **Send test** para comprobar la entrega.
+
+Los avisos se basan en el estado que reporta cada CLI. Las versiones que dependen de detección visual pueden variar con el idioma o la interfaz de la CLI. Linux usa el servicio de notificaciones del escritorio por D-Bus. En Windows, la primera entrega registra un acceso directo de icy en el menú Inicio para identificar el aviso.
+
+### Transparencia de la ventana
+
+En **Settings → Appearance → Window**, ajustá **Background transparency** entre 0 % (sólido, por defecto) y 100 %. El cambio se aplica en el momento y se guarda en `config.json` como `windowTransparency`. El ajuste requiere una superficie Wayland con alfa. Los fondos propios de las páginas web y las celdas con color explícito conservan su opacidad.
+
+icy solicita el desenfoque automáticamente a Niri 26.04 o posterior mediante `ext-background-effect`. También podés controlarlo con una regla en `config.kdl`. [Efectos de ventana de Niri](https://niri-wm.github.io/niri/Window-Effects.html)
+
+```kdl
+window-rule {
+    match title="^icy$"
+    draw-border-with-background false
+    background-effect {
+        blur true
+        xray true
+    }
+}
+```
+
 ### Editor integrado
 
 - Abre un archivo desde **Files**. El archivo se lee con resaltado y números de línea. Arrastrá para seleccionar, `Ctrl+A` selecciona todo y `Ctrl+C` copia (sin selección, copia la línea). Para editar, escribí, pegá o hacé doble clic: el editor nativo de JSNIR se abre con el cursor en ese punto. `Ctrl+S` (`Cmd+S` en macOS) guarda y `Esc` vuelve a la lectura si no hay cambios sin guardar.

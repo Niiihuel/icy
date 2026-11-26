@@ -130,16 +130,24 @@ interface TilingLayoutOptions {
   alwaysCenterSingleColumn: boolean;
 }
 
+interface AgentNotificationPreferences {
+  finished: boolean;
+  needsInput: boolean;
+  backgroundOnly: boolean;
+}
+
 interface ConfigView {
   theme: string;
   mode: "dark" | "light";
   accent: AccentName;
   density: DensityMode;
   fontSize: number;
+  windowTransparency: number;
   tilingMode: "niri" | "hyprland";
   layout: TilingLayoutOptions;
   checkUpdates: boolean;
   autoRestartUpdate: boolean;
+  agentNotifications: AgentNotificationPreferences;
   clis: CliConfigItem[];
   projects: string[];
   preferredEditor?: string | null;
@@ -527,13 +535,17 @@ const configState = signal<ConfigView>({
   accent: "blue",
   density: "comfortable",
   fontSize: 13,
+  windowTransparency: 0,
   tilingMode: "niri",
   layout: { defaultColumnWidth: 0.5, centerFocusedColumn: "never", alwaysCenterSingleColumn: false },
   checkUpdates: true,
   autoRestartUpdate: true,
+  agentNotifications: { finished: false, needsInput: false, backgroundOnly: true },
   clis: [],
   projects: [],
 });
+const windowTransparencySupported = signal(false);
+const notificationTest = signal({ pending: false, message: "" });
 
 const githubState = signal<GitHubView>({
   connected: false,
@@ -1420,6 +1432,8 @@ function SecondaryButton(props: {
   onPress: () => void;
   height?: number;
   grow?: number;
+  disabled?: Source<boolean>;
+  accessibleLabel?: string;
 }): Element {
   return (
     <Box
@@ -1431,10 +1445,13 @@ function SecondaryButton(props: {
         justify: "center",
         shrink: 0,
       }}
+      disabled={props.disabled}
       onPress={props.onPress}
       paint={() => ({
         radius: radii.md,
         background: palette().panelBg,
+        a11y: props.accessibleLabel ? { label: props.accessibleLabel } : undefined,
+        opacity: read(props.disabled ?? false) ? controlState.disabledOpacity : 1,
         edge: palette().border,
         edgeWidth: spacing.hairline,
         hover: { background: palette().sidebarActive, edge: hoverBorder() },
@@ -1460,6 +1477,7 @@ function SecondaryButton(props: {
 function ToggleSwitch(props: {
   checked: Source<boolean>;
   onToggle: () => void;
+  label?: string;
 }): Element {
   return (
     <Box
@@ -1477,6 +1495,7 @@ function ToggleSwitch(props: {
         background: read(props.checked) ? accent().brand : palette().kbdBg,
         edge: read(props.checked) ? accent().brand : palette().border,
         edgeWidth: spacing.hairline,
+        a11y: props.label ? { role: "switch", label: props.label, checked: read(props.checked) } : undefined,
         transitions: [smoothTransition("background", motion.fast)],
       })}
     >

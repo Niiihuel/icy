@@ -199,12 +199,32 @@ pub(crate) fn fallback(
                 return Working;
             }
         }
-        "claude"
+        "claude" => {
+            if footer().any(|line| line.contains("esc to cancel"))
+                && (any("do you want to proceed?") || any("do you want to allow this connection?"))
+            {
+                return Blocked;
+            }
             if title
                 .trim_start()
-                .starts_with(|ch: char| braille(ch) || "·✢✶✻✽*◐◓◑◒".contains(ch)) =>
-        {
-            return Working;
+                .starts_with(|ch: char| braille(ch) || "·✢✶✻✽*◐◓◑◒".contains(ch))
+                || footer().any(|line| line.contains("esc to interrupt"))
+            {
+                return Working;
+            }
+        }
+        "junie" => {
+            if footer().any(|line| line.split_whitespace().last() == Some("deny"))
+                && any("allow once")
+            {
+                return Blocked;
+            }
+            if footer().any(|line| line.contains("working") && line.contains("esc to stop")) {
+                return Working;
+            }
+            if let Some(progress) = progress {
+                return progress;
+            }
         }
         _ => {}
     }

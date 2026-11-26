@@ -252,7 +252,7 @@ function TilingWorkspaceView(): Element {
             on it leaves the overview. */}
         <Box style={() => ({ position: "absolute", left: 0, top: 0, width: area.value[0], height: area.value[1] })}
           onPress={() => { if (overviewOpen2.value && !overviewDragged) closeOverviewMode(); }}
-          paint={() => ({ background: isEmptyWorkspace() ? 0 : palette().sidebarBg })}
+          paint={() => ({ background: isEmptyWorkspace() ? 0 : windowUnderlay(palette().sidebarBg) })}
         />
         {/* JSNIR scales a box about its centre, which is niri's zoom about the output centre. */}
         <Box style={() => ({ position: "absolute", left: 0, top: 0, width: area.value[0], height: area.value[1] })}
@@ -515,7 +515,7 @@ function WorkspaceLayer(props: { index: () => number; area: () => [number, numbe
         radius: overviewOpen2.value ? zoomed(radii.panel) : 0,
         // Clear the empty workspace so the shell backdrop shows through.
         background: dropHere() && !overviewDrop.value?.insert ? accent().brandSoft
-          : empty() && isEmptyWorkspace() ? 0 : palette().appBg,
+          : empty() && isEmptyWorkspace() ? 0 : windowUnderlay(palette().appBg),
         edge: dropHere() || selected() ? accent().brand : 0,
         edgeWidth: zoomed(workspaceTiling.guideWidth),
         edgeSides: dropHere() && overviewDrop.value?.insert ? [1, 0, 0, 0] : [1, 1, 1, 1],

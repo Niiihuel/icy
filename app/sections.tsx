@@ -60,10 +60,10 @@ function metricsCardPaint(): Paint {
   };
 }
 
-function scanMetrics(): void {
+function scanMetrics(refresh: boolean): void {
   if (metricsScanState.value === "loading") return;
   metricsScanState.value = "loading";
-  requestHost({ type: "scanUsage" });
+  if (!requestHost({ type: "scanUsage", refresh })) metricsScanState.value = "error";
 }
 
 // ---- Shared chart pieces ---------------------------------------------------------------------
@@ -381,7 +381,7 @@ function MetricsHeader(props: { data: () => MetricsDashboard }): Element {
           icon="refresh"
           label="Refresh local usage"
           disabled={() => metricsScanState.value === "loading"}
-          onPress={scanMetrics}
+          onPress={() => scanMetrics(true)}
         />
       </Row>
     </Box>
@@ -391,6 +391,30 @@ function MetricsHeader(props: { data: () => MetricsDashboard }): Element {
 // ---- KPI cards -------------------------------------------------------------------------------
 
 type MetricCardField = "input" | "output" | "sessions" | "duration";
+
+function metricsCardStyle(): Style {
+  const { cardHeight, cardVerticalPadding, cardPadding } = metricsLayout;
+  return {
+    grow: metricsCardsFit(2) ? 1 : 0,
+    basis: metricsCardsFit(2) ? 0 : undefined,
+    minWidth: 0, height: cardHeight, shrink: 0,
+    padding: [cardVerticalPadding, cardPadding, cardVerticalPadding, cardPadding],
+    gap: spacing.unit,
+  };
+}
+
+function metricsCardGridStyle(): Style {
+  return { direction: metricsCardsFit(4) ? "row" : "column", gap: metricsLayout.gap, shrink: 0 };
+}
+
+function metricsCardPairStyle(): Style {
+  return {
+    direction: metricsCardsFit(2) ? "row" : "column",
+    grow: metricsCardsFit(4) ? 1 : 0,
+    basis: metricsCardsFit(4) ? 0 : undefined,
+    minWidth: 0, gap: metricsLayout.gap,
+  };
+}
 
 function MetricCard(props: {
   label: string;
@@ -407,19 +431,7 @@ function MetricCard(props: {
     () => Math.max(1, ...props.data().buckets.map((bucket) => bucket[props.field])));
   const color = () => metricsColors()[props.field];
   return (
-    <Column
-      style={() => ({
-        grow: metricsCardsFit(2) ? 1 : 0,
-        basis: metricsCardsFit(2) ? 0 : undefined,
-        minWidth: 0, height: metricsLayout.cardHeight, shrink: 0,
-        padding: [
-          metricsLayout.cardVerticalPadding, metricsLayout.cardPadding,
-          metricsLayout.cardVerticalPadding, metricsLayout.cardPadding,
-        ],
-        gap: spacing.unit,
-      })}
-      paint={metricsCardPaint}
-    >
+    <Column style={metricsCardStyle} paint={metricsCardPaint}>
       <Row style={{ align: "center", justify: "between", gap: spacing.unit, height: metricsLayout.toolSize }}>
         <MetricsText size={typeScale.label} color={() => palette().textSecondary}>
           {props.label}
@@ -472,18 +484,10 @@ function MetricCard(props: {
 }
 
 function MetricsCards(props: { data: () => MetricsDashboard }): Element {
-  const pair = () => ({
-    direction: metricsCardsFit(2) ? "row" as const : "column" as const,
-    grow: metricsCardsFit(4) ? 1 : 0,
-    basis: metricsCardsFit(4) ? 0 : undefined,
-    minWidth: 0, gap: metricsLayout.gap,
-  });
   const tokensReported = (totals: MetricTotals) => totals.calls > 0;
   return (
-    <Box style={() => ({
-      direction: metricsCardsFit(4) ? "row" : "column", gap: metricsLayout.gap, shrink: 0,
-    })}>
-      <Box style={pair}>
+    <Box style={metricsCardGridStyle}>
+      <Box style={metricsCardPairStyle}>
         <MetricCard
           label="Input tokens" field="input" data={props.data} format={metricCompact} available={tokensReported}
           detail={({ totals }) => totals.input > 0
@@ -494,7 +498,7 @@ function MetricsCards(props: { data: () => MetricsDashboard }): Element {
           detail={({ totals }) => totals.calls > 0 ? `${metricCompact(totals.output / totals.calls)} per model call` : "Model responses"}
         />
       </Box>
-      <Box style={pair}>
+      <Box style={metricsCardPairStyle}>
         <MetricCard
           label="Sessions" field="sessions" data={props.data} format={metricCount}
           available={() => !!metricsUsageState.value &&
@@ -515,6 +519,10 @@ function MetricsCards(props: { data: () => MetricsDashboard }): Element {
 // ---- Token volume ----------------------------------------------------------------------------
 
 type VolumeField = "input" | "output";
+
+const metricsChartBodyStyle: Style = { padding: metricsLayout.cardPadding, gap: spacing.unit * 3 };
+const metricsVolumePlotStyle: Style = { grow: 1, minWidth: 0, gap: spacing.unit * 2 };
+const metricsVolumeAxisStyle: Style = { height: metricsLayout.axisLabelHeight + spacing.unit };
 
 function MetricsVolume(props: { data: () => MetricsDashboard }): Element {
   const layout = metricsLayout;
@@ -579,7 +587,7 @@ function MetricsVolume(props: { data: () => MetricsDashboard }): Element {
 
   return (
     <MetricsPanel title="Token volume" summary={summary}>
-      <Column ref={hover.ref} style={{ padding: layout.cardPadding, gap: spacing.unit * 3 }}>
+      <Column ref={hover.ref} style={metricsChartBodyStyle}>
         <Row style={{ gap: spacing.unit, align: "center", margin: [0, 0, 0, -spacing.unit * 2] }}>
           <MetricsLegendToggle color={() => metricsColors().input} on={visible.input} other={visible.output}>Input</MetricsLegendToggle>
           <MetricsLegendToggle color={() => metricsColors().output} on={visible.output} other={visible.input}>Output</MetricsLegendToggle>
@@ -598,7 +606,7 @@ function MetricsVolume(props: { data: () => MetricsDashboard }): Element {
               </Box>
             )}
           </For>
-          <Column style={{ grow: 1, minWidth: 0, gap: spacing.unit * 2 }}>
+          <Column style={metricsVolumePlotStyle}>
             <Box style={{ height: plotHeight }}>
               {/* Axis pointer: a shaded band behind the pointed bucket. */}
               <Box
@@ -659,7 +667,7 @@ function MetricsVolume(props: { data: () => MetricsDashboard }): Element {
               </For>
             </Box>
             {/* X axis, with the pointed bucket's date in a pill that follows the pointer. */}
-            <Box style={{ height: layout.axisLabelHeight + spacing.unit }}>
+            <Box style={metricsVolumeAxisStyle}>
               <For each={xLabels} key={(index) => index} style={() => ({ position: "absolute", left: 0, top: 0, width: plotWidth() })}>
                 {(index) => (
                   <Box style={() => ({ position: "absolute", top: 0, left: labelX(index()), width: layout.axisLabelWidth })}>
@@ -724,7 +732,7 @@ function MetricsActivity(props: { data: () => MetricsDashboard }): Element {
   };
   return (
     <MetricsPanel title="Peak activity" summary="Model calls · UTC" style={metricsHalfStyle}>
-      <Column ref={hover.ref} style={{ padding: layout.cardPadding, gap: spacing.unit * 3 }}>
+      <Column ref={hover.ref} style={metricsChartBodyStyle}>
         <Column>
           {metricWeekdays.map((weekday, row) => (
             <Row style={{ align: "center" }}>
@@ -1068,25 +1076,20 @@ function MetricsAgents(props: { data: () => MetricsDashboard }): Element {
 
 // ---- Loading and empty states ----------------------------------------------------------------
 
-function metricsSkeletonPaint(radius: number = radii.sm): Paint {
-  return skeletonPaint(metricsColors().track, radius);
-}
-
 function MetricsSkeletonBlock(props: { width?: number; height: number; grow?: boolean }): Element {
   return (
     <Box
       style={{ width: props.width, height: props.height, grow: props.grow ? 1 : 0, basis: props.grow ? 0 : undefined, minWidth: 0, shrink: 0 }}
-      paint={() => metricsSkeletonPaint()}
+      paint={() => ({ radius: radii.sm, background: metricsColors().track })}
     />
   );
 }
 
-// Fixed pseudo-random bar heights, so the placeholder reads as a chart without jumping around.
-function metricsSkeletonBars(count: number, height: number): Element {
+function metricsSkeletonBars(height: number, growsDown = false): Element {
   return (
-    <Row style={{ height, align: "end", gap: spacing.unit, minWidth: 0 }}>
-      {Array.from({ length: count }, (_, index) => (
-        <MetricsSkeletonBlock grow height={Math.round(height * (0.25 + 0.7 * Math.abs(Math.sin(index * 1.7 + 0.4))))} />
+    <Row style={{ height, align: growsDown ? "start" : "end", gap: metricsLayout.gap, minWidth: 0 }}>
+      {metricsSkeletonLayout.bars.map((fraction) => (
+        <MetricsSkeletonBlock grow height={Math.round(height * fraction)} />
       ))}
     </Row>
   );
@@ -1095,68 +1098,91 @@ function metricsSkeletonBars(count: number, height: number): Element {
 function MetricsSkeletonPanel(props: { title: string; style?: () => Style; children: Children }): Element {
   return (
     <MetricsPanel title={props.title} summary="" style={props.style}>
-      <Column style={{ padding: metricsLayout.cardPadding, gap: spacing.unit * 3 }}>{props.children}</Column>
+      <Column style={metricsChartBodyStyle}>{props.children}</Column>
     </MetricsPanel>
   );
 }
 
-function MetricsSkeletonRows(props: { count: number }): Element {
+function MetricsSkeletonTable(props: { agents?: boolean }): Element {
+  const layout = metricsLayout;
+  const count = () => 1 + (props.agents ? configState.value.clis.length : metricsSkeletonLayout.modelRows);
   return (
-    <Column style={{ gap: spacing.unit * 3 }}>
-      {Array.from({ length: props.count }, () => (
-        <Row style={{ gap: spacing.unit * 3, align: "center" }}>
-          <MetricsSkeletonBlock width={spacing.unit * 4} height={spacing.unit * 4} />
-          <MetricsSkeletonBlock grow height={spacing.unit * 2.5} />
-          <MetricsSkeletonBlock width={metricsLayout.tableNumber} height={spacing.unit * 2.5} />
-          <MetricsSkeletonBlock width={metricsLayout.tableNumber} height={spacing.unit * 2.5} />
-        </Row>
-      ))}
-    </Column>
+    <For each={() => Array.from({ length: count() }, (_, index) => index)} key={(index) => index}>
+      {(index) => (
+        <Box style={metricsTableRowStyle} paint={() => metricsTableRowPaint(false, false)}>
+          <Row style={{ grow: 1, minWidth: 0, align: "center", gap: spacing.unit * 2 }}>
+            {props.agents && index() > 0 ? (
+              <MetricsSkeletonBlock width={spacing.unit * 4} height={spacing.unit * 4} />
+            ) : null}
+            <MetricsSkeletonBlock width={spacing.unit * 12} height={spacing.unit * 2} />
+          </Row>
+          {Array.from({ length: props.agents ? 3 : 4 }, () => (
+            <Row style={{ width: layout.tableNumber, shrink: 0, justify: "end" }}>
+              <MetricsSkeletonBlock width={layout.tableNumber / 2} height={spacing.unit * 2} />
+            </Row>
+          ))}
+          {props.agents ? <Box style={{ width: layout.toolSize, shrink: 0 }} /> : null}
+        </Box>
+      )}
+    </For>
   );
 }
 
 function MetricsSkeleton(): Element {
   const layout = metricsLayout;
   const card = () => (
-    <Column
-      style={() => ({
-        grow: 1, basis: 0, minWidth: 0, height: layout.cardHeight, gap: spacing.unit * 2.5,
-        padding: [layout.cardVerticalPadding, layout.cardPadding, layout.cardVerticalPadding, layout.cardPadding],
-      })}
-      paint={metricsCardPaint}
-    >
-      <MetricsSkeletonBlock width={spacing.unit * 20} height={spacing.unit * 3} />
+    <Column style={metricsCardStyle} paint={metricsCardPaint}>
+      <Row style={{ height: layout.toolSize, align: "center" }}>
+        <MetricsSkeletonBlock width={spacing.unit * 20} height={spacing.unit * 3} />
+      </Row>
       <MetricsSkeletonBlock width={spacing.unit * 24} height={spacing.unit * 7} />
       <MetricsSkeletonBlock width={spacing.unit * 28} height={spacing.unit * 2.5} />
       <Box style={{ grow: 1 }} />
-      {metricsSkeletonBars(16, layout.sparkHeight - spacing.unit * 2)}
+      {metricsSkeletonBars(layout.sparkHeight)}
     </Column>
   );
   return (
     <Column style={{ gap: layout.gap, shrink: 0 }}>
-      <Box style={() => ({ direction: metricsCardsFit(4) ? "row" : "column", gap: layout.gap })}>
-        <Box style={() => ({ direction: metricsCardsFit(2) ? "row" : "column", grow: 1, basis: 0, gap: layout.gap })}>{card()}{card()}</Box>
-        <Box style={() => ({ direction: metricsCardsFit(2) ? "row" : "column", grow: 1, basis: 0, gap: layout.gap })}>{card()}{card()}</Box>
+      <Box style={metricsCardGridStyle}>
+        <Box style={metricsCardPairStyle}>{card()}{card()}</Box>
+        <Box style={metricsCardPairStyle}>{card()}{card()}</Box>
       </Box>
       <MetricsSkeletonPanel title="Token volume">
-        <Row style={{ gap: spacing.unit * 3 }}>
+        <Row style={{ height: layout.toolSize, align: "center", gap: spacing.unit * 3 }}>
           <MetricsSkeletonBlock width={spacing.unit * 12} height={spacing.unit * 3} />
           <MetricsSkeletonBlock width={spacing.unit * 12} height={spacing.unit * 3} />
         </Row>
-        {metricsSkeletonBars(layout.plotBars, layout.plotInputHeight + layout.plotOutputHeight)}
+        <Row style={{ gap: layout.gap }}>
+          <Box style={{ width: layout.plotScaleWidth, shrink: 0 }} />
+          <Column style={metricsVolumePlotStyle}>
+            <Column>
+              {metricsSkeletonBars(layout.plotInputHeight)}
+              {metricsSkeletonBars(layout.plotOutputHeight, true)}
+            </Column>
+            <Box style={metricsVolumeAxisStyle} />
+          </Column>
+        </Row>
       </MetricsSkeletonPanel>
       <Box style={() => ({ direction: metricsPanelsFit() ? "row" : "column", gap: layout.gap })}>
         <MetricsSkeletonPanel title="Peak activity" style={metricsHalfStyle}>
-          {Array.from({ length: 7 }, () => <MetricsSkeletonBlock height={layout.heatmapCellHeight} />)}
+          <Column style={{ gap: layout.heatmapGap }}>
+            {metricWeekdays.map((weekday) => (
+              <Row style={{ gap: layout.heatmapGap, align: "center" }}>
+                <MetricsAxisText style={{ width: layout.heatmapLabelWidth, shrink: 0 }}>{weekday}</MetricsAxisText>
+                <MetricsSkeletonBlock grow height={layout.heatmapCellHeight} />
+              </Row>
+            ))}
+            <Box style={{ height: layout.axisLabelHeight + spacing.unit, shrink: 0 }} />
+          </Column>
+          <MetricsSkeletonBlock width={layout.heatmapLabelWidth * 2} height={layout.axisLabelHeight} />
         </MetricsSkeletonPanel>
-        <MetricsSkeletonPanel title="Agents" style={metricsHalfStyle}>
-          <MetricsSkeletonRows count={5} />
-        </MetricsSkeletonPanel>
+        <MetricsPanel title="Agents" summary="" style={metricsHalfStyle}>
+          <MetricsSkeletonTable agents />
+        </MetricsPanel>
       </Box>
-      <MetricsSkeletonPanel title="Models">
-        <MetricsSkeletonBlock height={layout.mark} />
-        <MetricsSkeletonRows count={4} />
-      </MetricsSkeletonPanel>
+      <MetricsPanel title="Models" summary="">
+        <MetricsSkeletonTable />
+      </MetricsPanel>
     </Column>
   );
 }
@@ -1170,7 +1196,7 @@ function MetricsError(): Element {
       <Glyph name="dashboard" size={metricsLayout.errorIcon} color={() => palette().textMuted} />
       <MetricsText size={typeScale.body} weight={fontWeights.medium}>Couldn’t read local usage</MetricsText>
       <MetricsText color={() => palette().textMuted}>The agents’ history files could not be scanned.</MetricsText>
-      <GhostButton icon="refresh" label="Try again" onPress={scanMetrics} />
+      <GhostButton icon="refresh" label="Try again" onPress={() => scanMetrics(true)} />
     </Column>
   );
 }
@@ -1183,8 +1209,7 @@ function MetricsBody(props: { data: () => MetricsDashboard }): Element {
       // A refresh keeps the last scan on screen, dimmed until the new one lands.
       paint={() => ({
         opacity: metricsScanState.value === "loading" ? layout.refreshingOpacity : 1,
-        starting: { opacity: 0, y: 6 },
-        transitions: [smoothTransition("opacity", motion.enter), smoothTransition("y", motion.enter)],
+        transitions: [smoothTransition("opacity", motion.enter)],
       })}
     >
       <MetricsCards data={props.data} />
@@ -1200,7 +1225,11 @@ function MetricsBody(props: { data: () => MetricsDashboard }): Element {
 
 function MetricsView(): Element {
   const data = metricsDashboardSource();
-  if (metricsScanState.value === "idle") scanMetrics();
+  if (metricsScanState.value === "idle") scanMetrics(false);
+  const showSkeleton = signal(false);
+  if (metricsUsageState.value === null) {
+    afterView(metricsSkeletonLayout.delay, () => { showSkeleton.value = true; });
+  }
   const viewWidth = signal(0);
   const fadeHeight = signal(0);
   let root: number | undefined;
@@ -1219,7 +1248,12 @@ function MetricsView(): Element {
     afterView(16, measure);
     afterView(SPRING_MS + 40, measure);
   });
-  const state = () => metricsUsageState.value !== null ? "ready" : metricsScanState.value === "error" ? "error" : "loading";
+  const state = () => {
+    if (viewWidth.value === 0) return "waiting";
+    if (metricsUsageState.value !== null) return "ready";
+    if (metricsScanState.value === "error") return "error";
+    return showSkeleton.value ? "skeleton" : "waiting";
+  };
   const column = () => ({ width: metricsWidth(), shrink: 0 });
   return (
     <Column
@@ -1239,7 +1273,8 @@ function MetricsView(): Element {
           <Column style={() => ({ ...column(), padding: [0, 0, metricsLayout.padding, 0] })}>
             <Dynamic value={state}>
               {(current) => current === "ready" ? <MetricsBody data={data} />
-                : current === "error" ? <MetricsError /> : <MetricsSkeleton />}
+                : current === "error" ? <MetricsError />
+                : current === "skeleton" ? <MetricsSkeleton /> : <Box />}
             </Dynamic>
           </Column>
         </Column>

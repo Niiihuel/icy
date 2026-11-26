@@ -1649,6 +1649,7 @@ dependencies = [
  "icy-core",
  "jsnir",
  "jsnir-gpu",
+ "pollster",
  "resvg",
  "serde",
  "serde_json",
@@ -1668,12 +1669,18 @@ dependencies = [
  "interprocess",
  "libc",
  "portable-pty",
+ "raw-window-handle",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "widestring",
+ "windows",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]

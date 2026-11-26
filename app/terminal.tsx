@@ -6,7 +6,7 @@
 function paneCardPaint(focused: boolean, multiPane: boolean): Paint {
   return {
     radius: multiPane ? radii.popover : 0,
-    background: palette().appBg,
+    background: windowUnderlay(palette().appBg),
     edge: multiPane ? (focused ? palette().ring : palette().border) : 0,
     // The width stays: fullscreen fades the border out with the tiling spring (niri interpolates
     // its border by `fullscreen_progress`) instead of dropping it in the first frame.

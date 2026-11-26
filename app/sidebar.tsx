@@ -649,7 +649,7 @@ function ExpandedSidebar(): Element {
         gap: 2,
       }}
       paint={() => ({
-        background: palette().sidebarBg,
+        background: windowUnderlay(palette().sidebarBg),
         ...sidebarSwapMotion(),
       })}
     >
@@ -949,7 +949,7 @@ function CompactSidebar(): Element {
         gap: 4,
       }}
       paint={() => ({
-        background: palette().sidebarBg,
+        background: windowUnderlay(palette().sidebarBg),
         ...sidebarSwapMotion(),
       })}
     >

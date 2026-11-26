@@ -1562,7 +1562,7 @@ function TileActions(props: { id: () => number; spec: () => TileSpec; menuOpen: 
         }
         if (kind === "metrics") {
           return <IconButton size="sm" side="bottom" icon="refresh" label="Refresh local usage"
-            disabled={() => metricsScanState.value === "loading"} onPress={scanMetrics} />;
+            disabled={() => metricsScanState.value === "loading"} onPress={() => scanMetrics(true)} />;
         }
         if (kind === "files") {
           return (

@@ -84,7 +84,7 @@ function TabBar(): Element {
       <Box
         style={{ height: spacing.headerHeight - layout.stroke, shrink: 0,
           margin: [0, 0, layout.stroke - spacing.headerHeight, 0] }}
-        paint={() => ({ background: tabs().length > 0 ? palette().sidebarBg : 0 })}
+        paint={() => ({ background: tabs().length > 0 ? windowUnderlay(palette().sidebarBg) : 0 })}
       />
       <Row
         style={{

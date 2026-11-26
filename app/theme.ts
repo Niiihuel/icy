@@ -420,6 +420,25 @@ function withAlpha(color: number, fraction: number): number {
   return ((color & 0xffffff00) | Math.round(fraction * (color & 0xff))) >>> 0;
 }
 
+const windowAppearance = {
+  maxTransparency: 100,
+  transparencyStep: 5,
+  valueWidth: spacing.unit * 9,
+};
+
+function windowTransparency(): number {
+  return windowTransparencySupported.value ? configState.value.windowTransparency : 0;
+}
+
+function windowBackdrop(): number {
+  return withAlpha(palette().sidebarBg, 1 - windowTransparency() / windowAppearance.maxTransparency);
+}
+
+// In translucent mode the base tint is shared by the shell and the terminal panes.
+function windowUnderlay(color: number): number {
+  return windowTransparency() > 0 ? 0 : color;
+}
+
 function mixColor(a: number, b: number, t: number): number {
   const ch = (c: number, shift: number) => (c >>> shift) & 255;
   const lerp = (shift: number) => Math.round(ch(a, shift) + (ch(b, shift) - ch(a, shift)) * t);
@@ -580,7 +599,7 @@ const terminalGridLayout = {
   settleDelay: 40,
 };
 
-// Loading placeholders (Metrics, a terminal before its first frame): blocks pulse in step.
+// Loading placeholders for a terminal or browser before its first frame.
 const skeletonMotion = {
   pulse: 900,
   dim: 0.45,
@@ -755,6 +774,8 @@ const floatingLayout = {
   // JSNIR `paint.backdropBlur` (dual Kawase, niri's non-xray blur): the modal backdrop blurs the
   // whole workspace; each floating surface blurs what is under it, tinted by a translucent `cardBg`.
   backdropBlur: 24,
+  // The blur carries the separation; the theme's backdrop dim is kept at half so it stays visible.
+  backdropDim: 0.5,
   surfaceBlur: 16,
   saturation: 1.4,
   surfaceAlpha: 0.72,
@@ -859,6 +880,12 @@ const metricsLayout = {
   shareColumnMin: 640,
   maxVisibleModels: 8,
   refreshingOpacity: 0.6,
+};
+
+const metricsSkeletonLayout = {
+  delay: 120,
+  bars: [0.38, 0.62, 0.47, 0.82, 0.56, 0.73, 0.42, 0.61],
+  modelRows: 4,
 };
 
 const metricsColorMix = {

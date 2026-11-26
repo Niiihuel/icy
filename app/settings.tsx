@@ -250,7 +250,7 @@ function SettingsSidebar(): Element {
         shrink: 0, padding: [settingsLayout.fieldGap, settingsLayout.inset, settingsLayout.inset, settingsLayout.inset],
         gap: spacing.unit / 2,
       })}
-      paint={() => ({ background: palette().sidebarBg, ...accordeeFadeUpMotion() })}
+      paint={() => ({ background: windowUnderlay(palette().sidebarBg), ...accordeeFadeUpMotion() })}
     >
       <Row
         style={{ height: 28, padding: [0, 8, 0, 6], align: "center", gap: 8, shrink: 0 }}
@@ -344,7 +344,7 @@ function SettingsShell(): Element {
         paint={() => ({
           radius: radii.lg,
           // No outline: the frame reads through the sidebar/app background contrast.
-          background: palette().appBg,
+          background: windowUnderlay(palette().appBg),
           shadows: [shadows.panel],
         })}
       >
@@ -405,9 +405,37 @@ function AppearanceSettings(): Element {
     terminalFontSize.value = next;
     updateConfig({ fontSize: next });
   };
+  const transparency = () => configState.value.windowTransparency;
+  const changeTransparency = (direction: number) => {
+    const max = windowAppearance.maxTransparency;
+    const next = Math.max(0, Math.min(max, transparency() + direction * windowAppearance.transparencyStep));
+    if (windowTransparencySupported.value && next !== transparency()) {
+      updateConfig({ windowTransparency: next });
+    }
+  };
 
   return (
     <Column style={{ gap: layout.sectionGap }}>
+      <SettingsCard flush title="Window">
+        <SettingsRowItem divider={false} title="Background transparency"
+          subtitle={() => windowTransparencySupported.value
+            ? "0% is solid. Niri can blur the wallpaper behind the window."
+            : "Requires a Wayland surface with alpha support."}
+          control={
+            <Row style={{ align: "center", gap: spacing.unit }}>
+              <SecondaryButton label="−" accessibleLabel="Decrease background transparency"
+                disabled={() => !windowTransparencySupported.value || transparency() === 0}
+                onPress={() => changeTransparency(-1)} />
+              <Box style={{ width: windowAppearance.valueWidth, align: "center" }}>
+                <Text font={{ family: fontFamilies.mono, size: typeScale.label }}
+                  paint={() => ({ color: palette().textPrimary })}>{() => `${transparency()}%`}</Text>
+              </Box>
+              <SecondaryButton label="+" accessibleLabel="Increase background transparency"
+                disabled={() => !windowTransparencySupported.value || transparency() === windowAppearance.maxTransparency}
+                onPress={() => changeTransparency(1)} />
+            </Row>
+          } />
+      </SettingsCard>
       <SettingsCard flush title="Themes" description="Load custom JSON themes from the themes folder."
         right={
           <Row style={{ gap: spacing.unit, shrink: 0 }}>
@@ -500,6 +528,33 @@ function AppearanceSettings(): Element {
   );
 }
 
+function AgentNotificationSettings(): Element {
+  const preferences = () => configState.value.agentNotifications;
+  const toggle = (key: keyof AgentNotificationPreferences) =>
+    updateConfig({ agentNotifications: { [key]: !preferences()[key] } });
+  const test = () => {
+    notificationTest.value = { pending: true, message: "" };
+    if (!requestHost({ type: "testNotification" })) {
+      notificationTest.value = { pending: false, message: "Couldn’t send the test notification." };
+    }
+  };
+  return (
+    <SettingsCard flush title="Desktop notifications">
+      <SettingsRowItem divider={false} title="Task completion"
+        control={<ToggleSwitch label="Task completion" checked={() => preferences().finished} onToggle={() => toggle("finished")} />} />
+      <SettingsRowItem title="Approvals and questions"
+        control={<ToggleSwitch label="Approvals and questions" checked={() => preferences().needsInput} onToggle={() => toggle("needsInput")} />} />
+      <SettingsRowItem title="Only for background sessions"
+        subtitle="Skip alerts for the selected agent when the icy window has focus."
+        control={<ToggleSwitch label="Only for background sessions" checked={() => preferences().backgroundOnly} onToggle={() => toggle("backgroundOnly")} />} />
+      <SettingsRowItem title="Test delivery"
+        subtitle={() => notificationTest.value.message || "Send a test desktop notification."}
+        control={<SecondaryButton label={() => notificationTest.value.pending ? "Sending…" : "Send test"}
+          disabled={() => notificationTest.value.pending} onPress={test} />} />
+    </SettingsCard>
+  );
+}
+
 function SettingsView(): Element {
   return (
     <Column style={{ grow: 1, minHeight: 0, scroll: true }}>
@@ -515,73 +570,76 @@ function SettingsView(): Element {
 
             if (current === "clis") {
               return (
-                <SettingsCard
-                  flush
-                  title="Configured agents"
-                >
-                  <For
-                    each={() => configState.value.clis}
-                    key={(cli) => cli.id}
+                <Column style={{ gap: settingsLayout.sectionGap }}>
+                  <AgentNotificationSettings />
+                  <SettingsCard
+                    flush
+                    title="Configured agents"
                   >
-                    {(cli) => (
-                      <Row
-                        style={{
-                          padding: settingsLayout.rowPadding,
-                          align: "center",
-                          justify: "between",
-                          gap: 10,
-                        }}
-                        paint={() => ({
-                          edge: palette().border,
-                          edgeWidth: configState.value.clis[0]?.id === cli().id ? 0 : spacing.hairline,
-                          edgeSides: [1, 0, 0, 0],
-                        })}
-                      >
-                        <Row style={{ align: "center", gap: 10, grow: 1, minWidth: 0 }}>
-                          <Image
-                            source={() => "cli:" + cli().id}
-                            style={{ width: 20, height: 20, shrink: 0 }}
-                          />
-                          <Column style={{ gap: 2, grow: 1, minWidth: 0 }}>
-                            <Row style={{ align: "center", gap: 8 }}>
+                    <For
+                      each={() => configState.value.clis}
+                      key={(cli) => cli.id}
+                    >
+                      {(cli) => (
+                        <Row
+                          style={{
+                            padding: settingsLayout.rowPadding,
+                            align: "center",
+                            justify: "between",
+                            gap: 10,
+                          }}
+                          paint={() => ({
+                            edge: palette().border,
+                            edgeWidth: configState.value.clis[0]?.id === cli().id ? 0 : spacing.hairline,
+                            edgeSides: [1, 0, 0, 0],
+                          })}
+                        >
+                          <Row style={{ align: "center", gap: 10, grow: 1, minWidth: 0 }}>
+                            <Image
+                              source={() => "cli:" + cli().id}
+                              style={{ width: 20, height: 20, shrink: 0 }}
+                            />
+                            <Column style={{ gap: 2, grow: 1, minWidth: 0 }}>
+                              <Row style={{ align: "center", gap: 8 }}>
+                                <Text
+                                  font={{
+                                    family: fontFamilies.sans,
+                                    size: typeScale.label,
+                                    weight: fontWeights.semibold,
+                                  }}
+                                  paint={() => ({ color: palette().textPrimary })}
+                                >
+                                  {() => cli().name}
+                                </Text>
+                                <CountPill count={() => cli().command} />
+                              </Row>
                               <Text
-                                font={{
-                                  family: fontFamilies.sans,
-                                  size: typeScale.label,
-                                  weight: fontWeights.semibold,
-                                }}
-                                paint={() => ({ color: palette().textPrimary })}
+                                lines={1}
+                                font={{ family: fontFamilies.sans, size: typeScale.tiny }}
+                                paint={() => ({ color: palette().textMuted })}
                               >
-                                {() => cli().name}
+                                {() => cli().description}
                               </Text>
-                              <CountPill count={() => cli().command} />
-                            </Row>
-                            <Text
-                              lines={1}
-                              font={{ family: fontFamilies.sans, size: typeScale.tiny }}
-                              paint={() => ({ color: palette().textMuted })}
-                            >
-                              {() => cli().description}
-                            </Text>
-                          </Column>
+                            </Column>
+                          </Row>
+                          <Row style={{ align: "center", gap: 10, shrink: 0 }}>
+                            <SecondaryButton
+                              label="Launch"
+                              height={26}
+                              onPress={() => launchCli(cli().id)}
+                            />
+                            <ToggleSwitch
+                              checked={() => cli().enabled}
+                              onToggle={() =>
+                                updateCliConfig(cli().id, { enabled: !cli().enabled })
+                              }
+                            />
+                          </Row>
                         </Row>
-                        <Row style={{ align: "center", gap: 10, shrink: 0 }}>
-                          <SecondaryButton
-                            label="Launch"
-                            height={26}
-                            onPress={() => launchCli(cli().id)}
-                          />
-                          <ToggleSwitch
-                            checked={() => cli().enabled}
-                            onToggle={() =>
-                              updateCliConfig(cli().id, { enabled: !cli().enabled })
-                            }
-                          />
-                        </Row>
-                      </Row>
-                    )}
-                  </For>
-                </SettingsCard>
+                      )}
+                    </For>
+                  </SettingsCard>
+                </Column>
               );
             }
 

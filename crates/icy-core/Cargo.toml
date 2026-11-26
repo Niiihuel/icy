@@ -10,6 +10,7 @@ bincode = "1.3.3"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 interprocess = "2.4.4"
 portable-pty = "0.9"
+raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
@@ -19,6 +20,17 @@ rusqlite = { version = "0.42.0", features = ["bundled"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+zbus = "5.19"
+
 [target.'cfg(windows)'.dependencies]
 widestring = "1.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Authorization", "Win32_System_Threading"] }
+windows = { version = "0.62.2", features = [
+    "Data_Xml_Dom", "UI_Notifications", "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_WinRT",
+    "Win32_UI_Shell_PropertiesSystem",
+] }

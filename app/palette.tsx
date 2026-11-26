@@ -241,7 +241,7 @@ function PaletteBackdrop(props: { children: Element | Element[] }): Element {
         align: "center", padding: [floatingTop(), 0, 0, 0], layer: launcherLayout.layer,
       })}
       onPress={closePalette}
-      paint={() => ({ background: palette().backdrop,
+      paint={() => ({ background: withAlpha(palette().backdrop, floatingLayout.backdropDim),
         backdropBlur: floatingLayout.backdropBlur, backdropSaturation: floatingLayout.saturation,
         // The blur grows in and out with the dim, as in the reference video.
         starting: { opacity: 0, backdropBlur: 0 }, exiting: { opacity: 0, backdropBlur: 0 },
@@ -287,7 +287,7 @@ function SearchPaletteBody(props: { request: PaletteRequest }): Element {
   const cursor = signal<string | null>(null);
   const rows = signal<PaletteRow[]>([]);
   const choices = signal<PaletteResult[]>([]);
-  const gridWidth = () => Math.max(0, launcherWidth() - layout.rowInset * 2 - layout.scrollGutter - spacing.hairline * 2);
+  const gridWidth = () => Math.max(0, launcherWidth() - layout.rowInset - layout.scrollGutter - spacing.hairline * 2);
   effect(() => {
     if (folder.value) return;
     const q = query.value.trim();
@@ -370,7 +370,8 @@ function SearchPaletteBody(props: { request: PaletteRequest }): Element {
           paint={() => ({ color: palette().textPrimary })}
         />
       </LauncherSearchBar>
-      <Box style={() => ({ height: panelHeight(), minHeight: 0, padding: [0, layout.rowInset, 0, layout.rowInset],
+      {/* No right padding: the rows' gutter holds the scrollbar, so it sits against the panel edge. */}
+      <Box style={() => ({ height: panelHeight(), minHeight: 0, padding: [0, 0, 0, layout.rowInset],
         clip: true })}
         onPress={() => {}}
         paint={() => ({ ...floatingSurface(), ...accordeeMenuMotion("top"),

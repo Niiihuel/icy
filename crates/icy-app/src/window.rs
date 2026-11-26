@@ -2,6 +2,8 @@
 //! input routes directly to the active PTY whenever no TSX text field has focus.
 use crate::browser;
 use crate::pixel_blast::PixelBlast;
+use crate::window_surface::Surface;
+use icy_core::config::IcyConfig;
 use icy_core::keybinds::{Chord, Keymap, canonical_key};
 use icy_core::platform::editor_command_modifier;
 use icy_core::vt::{CellPoint, SelectKind, modified_enter};
@@ -12,13 +14,12 @@ use jsnir::{
 use jsnir_gpu::{
     Result,
     input::{Clicks, Clipboard, ImeArea, KeyInput, editor_key, ime_event},
-    surface::{self, Surface},
     view::View,
 };
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
         mpsc::{Receiver, Sender, channel},
     },
     time::{Duration, Instant},
@@ -254,6 +255,10 @@ pub struct WindowHooks {
 
 enum Message {
     Push(String),
+    Config {
+        transparency: u8,
+        json: String,
+    },
     /// A whole-state push: JSNIR replaces a queued one with the same key (see `push_keyed`).
     PushKeyed(&'static str, String),
     Image {
@@ -274,6 +279,7 @@ type ScaleCallback = Box<dyn Fn(f32) + Send>;
 
 struct Shared {
     scale: AtomicU32,
+    focused: AtomicBool,
     on_scale: Mutex<Option<ScaleCallback>>,
 }
 
@@ -281,6 +287,7 @@ impl Default for Shared {
     fn default() -> Self {
         Self {
             scale: AtomicU32::new(1f32.to_bits()),
+            focused: AtomicBool::new(true),
             on_scale: Mutex::new(None),
         }
     }
@@ -316,8 +323,19 @@ impl Pusher {
         *self.shared.on_scale.lock().unwrap() = Some(Box::new(f));
     }
 
+    pub fn focused(&self) -> bool {
+        self.shared.focused.load(Ordering::Relaxed)
+    }
+
     pub fn push(&self, json: String) -> bool {
         self.send(Message::Push(json))
+    }
+
+    pub fn config(&self, config: &IcyConfig) {
+        self.send(Message::Config {
+            transparency: config.window_transparency,
+            json: serde_json::json!({ "view": "config", "data": config }).to_string(),
+        });
     }
 
     /// Like `push`, but a newer push with the same `key` replaces one not yet delivered. Frames
@@ -356,6 +374,7 @@ impl Pusher {
 struct AppWindow {
     instance: Option<wgpu::Instance>,
     surface: Option<Surface>,
+    window_transparency: u8,
     host: Host,
     view: View,
     title: String,
@@ -408,6 +427,7 @@ impl AppWindow {
         Self {
             instance: None,
             surface: None,
+            window_transparency: 0,
             host,
             view: View::default(),
             title: title.into(),
@@ -478,6 +498,29 @@ impl AppWindow {
             self.notify_viewport(logical_w, logical_h);
         }
         self.request_redraw();
+    }
+
+    fn sync_window_transparency(&mut self) {
+        let Some(surface) = &mut self.surface else {
+            return;
+        };
+        let supported = match surface.set_translucent(self.window_transparency > 0) {
+            Ok(changed) => {
+                if changed {
+                    self.view.reset();
+                    self.host.reset_images();
+                }
+                surface.supports_transparency()
+            }
+            Err(error) => {
+                eprintln!("icy: failed to change window transparency: {error}");
+                false
+            }
+        };
+        self.host.push(
+            serde_json::json!({ "view": "windowTransparencySupport", "data": supported })
+                .to_string(),
+        );
     }
 
     fn set_scale(&mut self, scale: f32) {
@@ -582,7 +625,8 @@ impl AppWindow {
                         *surface = next;
                         self.view.reset();
                         self.host.reset_images();
-                        surface.window.request_redraw();
+                        self.sync_window_transparency();
+                        self.request_redraw();
                     }
                     Err(error) => {
                         self.error = Some(error);
@@ -598,6 +642,15 @@ impl AppWindow {
             }
         };
         let acquired = Instant::now();
+        // Once per run: whether the driver lets JSNIR copy the swapchain, which the blur needs.
+        static BACKDROP_REPORTED: std::sync::Once = std::sync::Once::new();
+        BACKDROP_REPORTED.call_once(|| {
+            if jsnir_gpu::renderer::Renderer::supports_backdrop(&frame.texture) {
+                eprintln!("icy: backdrop blur on");
+            } else {
+                eprintln!("icy: backdrop blur off (the swapchain does not allow COPY_SRC)");
+            }
+        });
         let scale = surface.window.scale_factor() as f32;
         let pixels = [frame.texture.width(), frame.texture.height()];
         let [width, height] = pixels.map(|side| side as f32 / scale);
@@ -620,7 +673,7 @@ impl AppWindow {
             self.ime_area.update(&surface.window, area);
         }
         let prepared = Instant::now();
-        surface.renderer.draw(&frame.texture, pixels, scale, &draws);
+        surface.draw(&frame.texture, pixels, scale, draws);
         surface.window.pre_present_notify();
         surface.renderer.queue.present(frame);
         if let Some(stats) = &mut self.stats {
@@ -1314,7 +1367,7 @@ impl ApplicationHandler for AppWindow {
                     .with_inner_size(LogicalSize::new(width, height)),
             )
             .map_err(Box::from)
-            .and_then(|window| surface::open(&events.owned_display_handle(), Arc::new(window)));
+            .and_then(|window| Surface::open(&events.owned_display_handle(), Arc::new(window)));
         match window {
             Ok((instance, surface)) => {
                 let scale = surface.window.scale_factor() as f32;
@@ -1325,10 +1378,14 @@ impl ApplicationHandler for AppWindow {
                     .map(|mhz| ((mhz + 500) / 1000) as i32)
                     .unwrap_or(60);
                 let phys = surface.window.inner_size();
+                self.shared
+                    .focused
+                    .store(surface.window.has_focus(), Ordering::Relaxed);
                 let logical_w = phys.width as f32 / scale;
                 let logical_h = phys.height as f32 / scale;
                 self.instance = Some(instance);
                 self.surface = Some(surface);
+                self.sync_window_transparency();
                 self.browsers.set_refresh_rate(refresh_hz);
                 self.set_scale(scale);
                 self.notify_viewport(logical_w, logical_h);
@@ -1392,6 +1449,7 @@ impl ApplicationHandler for AppWindow {
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
+                self.shared.focused.store(focused, Ordering::Relaxed);
                 if !focused {
                     self.pixel_blast.pause();
                     self.release_blast.pause();
@@ -1441,10 +1499,17 @@ impl ApplicationHandler for AppWindow {
     fn user_event(&mut self, events: &ActiveEventLoop, _: ()) {
         let mut redraw = false;
         let mut edits = Vec::new();
-        for message in self.inbox.try_iter() {
+        while let Ok(message) = self.inbox.try_recv() {
             redraw = true;
             match message {
                 Message::Push(text) => self.host.push(text),
+                Message::Config { transparency, json } => {
+                    if transparency != self.window_transparency {
+                        self.window_transparency = transparency;
+                        self.sync_window_transparency();
+                    }
+                    self.host.push(json);
+                }
                 Message::PushKeyed(key, text) => self.host.push_keyed(key, text),
                 Message::Image { source, rgba, size } => self.host.set_image(source, rgba, size),
                 Message::Font(bytes) => self.host.add_font(bytes),
@@ -1624,6 +1689,7 @@ pub fn open_with(
     mut host: Host,
     title: &str,
     size: [u32; 2],
+    config: &IcyConfig,
     hooks: WindowHooks,
     start: impl FnOnce(Pusher),
 ) -> Result<()> {
@@ -1637,6 +1703,7 @@ pub fn open_with(
     };
     let browsers = browser::Browsers::new(pusher.clone(), shared.scale());
     start(pusher);
+    host.push(serde_json::json!({ "view": "config", "data": config }).to_string());
     host.poll();
     let mut window = AppWindow::new(
         host,
@@ -1647,6 +1714,7 @@ pub fn open_with(
         hooks,
         browsers,
     );
+    window.window_transparency = config.window_transparency;
     event_loop.run_app(&mut window)?;
     window.finish()
 }

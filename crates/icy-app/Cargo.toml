@@ -12,11 +12,18 @@ path = "src/main.rs"
 icy-core = { path = "../icy-core" }
 jsnir = { path = "../../../Jurui" }
 jsnir-gpu = { path = "../../../Jurui/backends/gpu" }
-resvg = { version = "0.48.1", default-features = false }
-serde = { version = "1", features = ["derive"] }
+# raster-images decodes the GitHub avatar (served as JPEG) inside an SVG circle clip.
+resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+ttf-parser = "0.21"
+# Pinned to the CEF runtime (147.0.10) that `export-cef-dir` installs; see README.
+cef = "=147.1.0"
 wgpu = { version = "=30.0.1", default-features = false }
 winit = { version = "=0.30.13", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "=30.0.1", default-features = false, features = ["dx12"] }

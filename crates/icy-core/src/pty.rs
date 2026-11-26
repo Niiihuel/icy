@@ -15,10 +15,8 @@ pub struct PtyHandle {
 }
 
 impl PtyHandle {
-    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
-        program: &str,
-        args: &[String],
+        mut cmd: CommandBuilder,
         cols: u16,
         rows: u16,
         cwd: Option<&Path>,
@@ -36,8 +34,6 @@ impl PtyHandle {
             })
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let mut cmd = CommandBuilder::new(program);
-        cmd.args(args);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         if let Some(dir) = cwd {
@@ -95,6 +91,10 @@ impl PtyHandle {
         writer.flush()
     }
 
+    pub fn foreground_cmdline(&self) -> Option<String> {
+        crate::platform::foreground_cmdline(self.master.as_ref())
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         self.master
             .resize(PtySize {
@@ -108,8 +108,17 @@ impl PtyHandle {
 
     pub fn kill(&self) {
         let _ = self.writer.lock().unwrap().take();
+        if let Ok(mut child) = self.child.lock()
+            && child.try_wait().is_ok_and(|status| status.is_none())
+            && child.kill().is_ok()
+        {
+            let _ = child.wait();
+        }
+    }
+
+    pub(crate) fn reap_if_exited(&self) {
         if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
+            let _ = child.try_wait();
         }
     }
 }

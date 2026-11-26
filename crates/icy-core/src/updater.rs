@@ -6,8 +6,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
 
 use serde::Serialize;
 
@@ -25,6 +23,7 @@ pub struct ReleaseMedia {
     pub duration: String,
     pub url: String,
     pub caption: String,
+    pub poster_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,25 +71,176 @@ impl UpdateState {
 fn default_release_notes(version: &str) -> ReleaseNotes {
     ReleaseNotes {
         version: version.into(),
-        title: format!("icy v{version} — Niri/Hyprland Tiling, Custom Themes & CLI Rings"),
+        title: format!("icy v{version}"),
         published_at: "Latest build".into(),
-        summary: "Accordee-grade motion curves, real SVGL CLI icons with live usage rings, SSH GitHub detection, persistent settings & themes, and multi-column tiling.".into(),
-        highlights: vec![
-            "Niri scrollable columns & Hyprland split tiling for parallel agent CLIs (Alt+H/J/K/L).".into(),
-            "Accordee menu, popover & modal entrance animations (fade + zoom + directional slide).".into(),
-            "Plain-JSON custom theme system in ~/.config/icy/themes/ with instant JSNIR reload.".into(),
-            "Official CLI logos from svgl.app inside live usage progress rings + animated tooltips.".into(),
-            "Automatic GitHub SSH detection, workspace Files, persistent Tasks & Agent Metrics.".into(),
-        ],
-        media: vec![ReleaseMedia {
-            kind: "video".into(),
-            title: "Walkthrough: Tiling & Clickable CLI Workflow".into(),
-            duration: "01:42".into(),
-            url: RELEASES_WEB_URL.into(),
-            caption: "Side-by-side Claude Code & Codex panes opening diffs with a single click.".into(),
-        }],
+        summary: String::new(),
+        highlights: Vec::new(),
+        media: Vec::new(),
         release_url: RELEASES_WEB_URL.into(),
     }
+}
+
+fn media_url(url: &str) -> Option<&str> {
+    let url = url.trim().trim_start_matches('<').trim_end_matches('>');
+    let authority = url
+        .strip_prefix("https://")?
+        .split(['/', '?', '#'])
+        .next()?;
+    (!authority.is_empty()
+        && !authority.contains('@')
+        && !url.contains(['\\', '"', '\''])
+        && !url.chars().any(char::is_whitespace))
+    .then_some(url)
+}
+
+fn extension_kind(url: &str) -> Option<&'static str> {
+    let path = url.split(['?', '#']).next()?;
+    match path.rsplit_once('.')?.1.to_ascii_lowercase().as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" => Some("image"),
+        "mp4" | "webm" | "mov" | "ogv" => Some("video"),
+        _ => None,
+    }
+}
+
+fn media(kind: &str, title: &str, url: &str, poster: Option<&str>) -> Option<ReleaseMedia> {
+    Some(ReleaseMedia {
+        kind: kind.into(),
+        title: title.trim().into(),
+        duration: String::new(),
+        url: media_url(url)?.into(),
+        caption: String::new(),
+        poster_url: poster.and_then(media_url).map(str::to_owned),
+    })
+}
+
+fn markdown_media_link(line: &str) -> Option<(&str, &str)> {
+    let (label, target) = line.strip_prefix('[')?.split_once("](")?;
+    let url = target
+        .trim_end()
+        .strip_suffix(')')?
+        .split_whitespace()
+        .next()?;
+    Some((label, url))
+}
+
+fn html_attribute(tag: &str, name: &str) -> Option<String> {
+    let key = format!(" {name}=");
+    let value = tag.split_once(&key)?.1;
+    let quote = value.chars().next().filter(|ch| matches!(ch, '"' | '\''))?;
+    value[1..]
+        .split_once(quote)
+        .map(|(value, _)| value.replace("&amp;", "&"))
+}
+
+fn release_media_line(line: &str) -> Option<ReleaseMedia> {
+    let line = line.trim();
+    let line = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .unwrap_or(line);
+    if let Some((poster, target)) = line
+        .strip_prefix("[!")
+        .and_then(|line| line.rsplit_once("]("))
+        && let Some(target) = target.strip_suffix(')').and_then(media_url)
+        && (extension_kind(target) == Some("video") || github_attachment(target))
+        && let Some((title, poster)) = markdown_media_link(poster)
+    {
+        return media("video", title, target, Some(poster));
+    }
+    if let Some(image) = line.strip_prefix('!') {
+        let (title, url) = markdown_media_link(image)?;
+        return media("image", title, url, None);
+    }
+    if line.starts_with("<img ") || line.starts_with("<video ") || line.starts_with("<video>") {
+        let kind = if line.starts_with("<img ") {
+            "image"
+        } else {
+            "video"
+        };
+        let url = html_attribute(line, "src")?;
+        let title = html_attribute(line, "alt").unwrap_or_default();
+        let poster = html_attribute(line, "poster");
+        return media(kind, &title, &url, poster.as_deref());
+    }
+    let (title, url) = markdown_media_link(line).unwrap_or(("", line));
+    let url = media_url(url)?;
+    // GitHub places uploaded videos on their own line. Uploaded images use image markup.
+    let kind = extension_kind(url).or_else(|| github_attachment(url).then_some("video"))?;
+    media(kind, title, url, None)
+}
+
+fn github_attachment(url: &str) -> bool {
+    url.starts_with("https://github.com/user-attachments/assets/")
+}
+
+fn release_content(
+    body: &str,
+    assets: &[serde_json::Value],
+) -> (String, Vec<String>, Vec<ReleaseMedia>) {
+    let mut summary = String::new();
+    let mut highlights = Vec::new();
+    let mut attachments = Vec::new();
+    for line in body.lines().map(str::trim) {
+        if let Some(item) = release_media_line(line) {
+            attachments.push(item);
+        } else if line.starts_with("![") || line.starts_with("<img ") || line.starts_with("<video")
+        {
+            continue;
+        } else if let Some(bullet) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            if highlights.len() < 8 {
+                highlights.push(bullet.trim().to_owned());
+            }
+        } else if summary.is_empty() && !line.is_empty() && !line.starts_with('#') {
+            summary = line.to_owned();
+        }
+    }
+    attachments.extend(assets.iter().filter_map(|asset| {
+        let url = asset.get("browser_download_url")?.as_str()?;
+        let name = asset.get("name")?.as_str()?;
+        let kind = match asset.get("content_type").and_then(|v| v.as_str()) {
+            Some(kind) if kind.starts_with("image/") => "image",
+            Some(kind) if kind.starts_with("video/") => "video",
+            _ => extension_kind(name)?,
+        };
+        media(kind, name, url, None)
+    }));
+    let mut seen = std::collections::HashSet::new();
+    attachments.retain(|item| seen.insert(item.url.clone()));
+    (summary, highlights, attachments)
+}
+
+/// Fetch a bounded raster cover off the UI thread. Redirects stay on HTTPS.
+pub fn fetch_release_image(url: &str) -> Option<tempfile::TempPath> {
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_PIXELS: u64 = 4096 * 4096;
+    let url = media_url(url)?;
+    // Close the handle before invoking `curl -o` so Windows does not reject writes to the temp file.
+    let path = tempfile::NamedTempFile::new().ok()?.into_temp_path();
+    let status = Command::new("curl")
+        .args([
+            "-fsL",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--connect-timeout",
+            "4",
+            "--max-time",
+            "10",
+            "--max-filesize",
+            &MAX_BYTES.to_string(),
+            "-o",
+        ])
+        .arg(&*path)
+        .args(["--", url])
+        .stdin(Stdio::null())
+        .status()
+        .ok()?;
+    if !status.success() || fs::metadata(&path).ok()?.len() > MAX_BYTES as u64 {
+        return None;
+    }
+    let (w, h) = crate::graphics::image_dimensions(&fs::read(&path).ok()?)?;
+    (w > 0 && h > 0 && u64::from(w) * u64::from(h) <= MAX_PIXELS).then_some(path)
 }
 
 /// Checks GitHub Releases for a newer `Niiihuel/icy` tag. Falls back cleanly to local
@@ -161,19 +311,11 @@ pub fn check_latest_release() -> UpdateState {
                 })
             });
 
-        let highlights: Vec<String> = body
-            .lines()
-            .map(str::trim)
-            .filter(|l| l.starts_with("- ") || l.starts_with("* "))
-            .map(|l| l[2..].trim().to_string())
-            .take(8)
-            .collect();
-        let summary = body
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('-'))
-            .unwrap_or("New release available from GitHub Releases.")
-            .to_string();
+        let assets = val
+            .get("assets")
+            .and_then(|v| v.as_array())
+            .map_or(&[][..], Vec::as_slice);
+        let (summary, highlights, media) = release_content(&body, assets);
 
         return UpdateState {
             current_version: CURRENT_VERSION.into(),
@@ -193,90 +335,55 @@ pub fn check_latest_release() -> UpdateState {
                 title,
                 published_at,
                 summary,
-                highlights: if highlights.is_empty() {
-                    default_release_notes(CURRENT_VERSION).highlights
-                } else {
-                    highlights
-                },
-                media: default_release_notes(CURRENT_VERSION).media,
+                highlights,
+                media,
                 release_url: html_url,
             },
         };
     }
 
-    // No published GitHub Release tag yet: expose release-notes preview cleanly.
+    // Offline or no published release yet: never invent an update.
     let mut fallback = UpdateState::initial();
-    fallback.has_update = true;
-    fallback.available_version = "0.2.0-preview".into();
-    fallback.status_text = "Preview v0.2.0 notes ready".into();
-    fallback.notes = default_release_notes("0.2.0-preview");
+    fallback.status_text = format!("Up to date (v{CURRENT_VERSION})");
     fallback
 }
 
-/// Downloads the release asset (or stages a verified dry-run package when previewing before
-/// the first GitHub tag exists), invoking `on_progress(stage, percent, status)` smoothly.
+/// Downloads the published release asset for this platform, invoking
+/// `on_progress(stage, percent, status)` as it advances.
 pub fn download_and_stage(
     asset_url: Option<&str>,
     version: &str,
     mut on_progress: impl FnMut(&str, u8, &str),
 ) -> Result<PathBuf, String> {
+    let Some(url) = asset_url else {
+        return Err("No release binary published for this platform".into());
+    };
     let stage_dir = env::temp_dir().join("icy-updates");
     fs::create_dir_all(&stage_dir).map_err(|e| format!("cannot create staging dir: {e}"))?;
     let staged_file = stage_dir.join(format!("icy-{version}.staged"));
 
-    on_progress("downloading", 12, "Connecting to GitHub Releases...");
-
-    if let Some(url) = asset_url {
-        on_progress("downloading", 35, "Downloading release binary...");
-        let status = Command::new("curl")
-            .args([
-                "-fsSL",
-                "--connect-timeout",
-                "10",
-                "--max-time",
-                "120",
-                "-o",
-            ])
-            .arg(&staged_file)
-            .arg(url)
-            .stdin(Stdio::null())
-            .status()
-            .map_err(|e| format!("failed to run curl: {e}"))?;
-        if !status.success() {
-            return Err("Download failed from GitHub Releases".into());
-        }
-        on_progress("verifying", 82, "Verifying staged binary...");
-        let meta = fs::metadata(&staged_file).map_err(|e| format!("staged file missing: {e}"))?;
-        if meta.len() == 0 {
-            return Err("Downloaded update file is empty".into());
-        }
-        on_progress("ready", 100, "Ready to install & restart");
-        return Ok(staged_file);
+    on_progress("downloading", 35, "Downloading release binary...");
+    let status = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "120",
+            "-o",
+        ])
+        .arg(&staged_file)
+        .arg(url)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| format!("failed to run curl: {e}"))?;
+    if !status.success() {
+        return Err("Download failed from GitHub Releases".into());
     }
-
-    // Preview / local validation when no GitHub Release asset is published yet:
-    // stages a copy of the current binary so the full ring + popover + restart modal flow works.
-    for (pct, label) in [
-        (28, "Fetching release manifest..."),
-        (54, "Staging update package..."),
-        (78, "Verifying binary integrity..."),
-        (94, "Preparing automatic restart..."),
-    ] {
-        thread::sleep(Duration::from_millis(220));
-        on_progress(
-            if pct >= 78 {
-                "verifying"
-            } else {
-                "downloading"
-            },
-            pct,
-            label,
-        );
-    }
-    if let Ok(current) = env::current_exe() {
-        let _ = fs::copy(&current, &staged_file);
-    } else {
-        let _ = fs::write(&staged_file, b"icy-preview");
+    on_progress("verifying", 82, "Verifying staged binary...");
+    let meta = fs::metadata(&staged_file).map_err(|e| format!("staged file missing: {e}"))?;
+    if meta.len() == 0 {
+        return Err("Downloaded update file is empty".into());
     }
     on_progress("ready", 100, "Ready to install & restart");
     Ok(staged_file)
@@ -305,6 +412,39 @@ pub fn is_newer_version(candidate: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_release_cover_media_without_turning_attachments_into_notes() {
+        let body = r#"
+# icy v2
+![Workspace](https://example.com/cover.png)
+[![Preview](https://example.com/poster.jpg)](https://example.com/demo.webm)
+<video controls poster="https://example.com/poster.jpg"><source src='https://example.com/tour.mp4'></video>
+https://github.com/user-attachments/assets/example
+![Unsafe](file:///private/image.png)
+
+A new workspace.
+- A faster overview.
+"#;
+        let assets = [
+            serde_json::json!({"name": "preview", "content_type": "image/png",
+                "browser_download_url": "https://example.com/cover.png"}),
+            serde_json::json!({"name": "demo.mp4", "content_type": "application/octet-stream",
+                "browser_download_url": "https://example.com/asset.mp4"}),
+        ];
+        let (summary, notes, media) = release_content(body, &assets);
+        assert_eq!(summary, "A new workspace.");
+        assert_eq!(notes, ["A faster overview."]);
+        assert_eq!(media.len(), 5);
+        assert_eq!(media[0].kind, "image");
+        assert_eq!(
+            media[1].poster_url.as_deref(),
+            Some("https://example.com/poster.jpg")
+        );
+        assert_eq!(media[2].url, "https://example.com/tour.mp4");
+        assert_eq!(media[3].kind, "video");
+        assert_eq!(media[4].url, "https://example.com/asset.mp4");
+    }
 
     #[test]
     fn compares_semver_versions() {

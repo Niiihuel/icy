@@ -842,7 +842,7 @@ function SettingsView(): Element {
                 />
                 <SettingsRowItem
                   title="Prompt to restart automatically"
-                  subtitle="Shows a confirmation modal before closing sessions and replacing the binary."
+                  subtitle="Shows a confirmation before replacing the executable and restarting the window."
                   control={
                     <ToggleSwitch
                       checked={() => configState.value.autoRestartUpdate}

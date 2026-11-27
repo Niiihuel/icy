@@ -220,17 +220,17 @@ function ReleaseNotesCover(props: {
 }
 
 function UpdateProgressBar(props: { width: number; height?: number }): Element {
-  const h = props.height ?? 4;
+  const height = props.height ?? 4;
   const pct = () => Math.max(0, Math.min(100, updateState.value.progress));
   return (
     <Box
-      style={{ width: props.width, height: h, clip: true, shrink: 0 }}
-      paint={() => ({ radius: h / 2, background: palette().kbdBg })}
+      style={{ width: props.width, height, clip: true, shrink: 0 }}
+      paint={() => ({ radius: height / 2, background: palette().kbdBg })}
     >
       <Box
-        style={() => ({ width: Math.round((props.width * pct()) / 100), height: h })}
+        style={() => ({ width: Math.round((props.width * pct()) / 100), height })}
         paint={() => ({
-          radius: h / 2,
+          radius: height / 2,
           background: updateReady() ? palette().successText : accent().brand,
           transitions: [smoothTransition("width", motion.panel)],
         })}
@@ -644,9 +644,7 @@ function RestartConfirmModal(): Element {
               font={{ family: fontFamilies.sans, size: typeScale.caption, lineHeight: 1.5 }}
               paint={() => ({ color: palette().textSecondary })}
             >
-              icy will close running terminal sessions, replace the binary with the verified
-              update package, and relaunch automatically. Make sure any unsaved edits in your
-              CLIs are saved before continuing.
+              icy will close this window, replace its executable, and reopen automatically.
             </Text>
 
             <Row style={{ justify: "end", gap: 8 }}>

@@ -4729,6 +4729,15 @@ mod tests {
         assert!(frame(&mut host).items.iter().any(|item| matches!(item,
             Item::Text { text, rect, clip, .. } if text == "Download update" && rect[0] >= 224. && clip[2] > 0.
         )));
+        let downloading = updater::UpdateState {
+            stage: "downloading".into(),
+            progress: 35,
+            ..update
+        };
+        host.push(json!({ "view": "update", "data": downloading }).to_string());
+        assert!(frame(&mut host).items.iter().any(|item| matches!(item,
+            Item::Text { text, clip, .. } if text == "Downloading… 35%" && clip[2] > 0.
+        )));
         host.escape();
 
         for id in 6..=10 {

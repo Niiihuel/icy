@@ -537,6 +537,10 @@ const workspaceTabLayout = {
   // Inactive tabs recede (image #4 reference): dimmed icon, muted title.
   dimOpacity: 0.55,
   width: 156,
+  minWidth: 96,
+  maxWidth: 400,
+  capWidth: spacing.unit * 5,
+  resizeHitWidth: spacing.unit * 1.5,
   closeSize: 20,
   gap: spacing.unit * 2,
   stripGap: spacing.unit / 2,

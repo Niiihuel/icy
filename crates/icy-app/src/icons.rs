@@ -4,6 +4,8 @@ use resvg::{tiny_skia, usvg};
 
 pub type Picture = (String, Vec<u8>, [u32; 2]);
 
+const ICY_ICON: &str = include_str!("../../../assets/icons/icy.svg");
+
 // Official SVGL CLI & platform logos embedded at compile time.
 const SVG_CLAUDE: &[u8] = include_bytes!("../../../assets/icons/clis/claude.svg");
 const SVG_ANTIGRAVITY: &[u8] = include_bytes!("../../../assets/icons/clis/antigravity.svg");
@@ -442,12 +444,10 @@ const UI_GLYPHS: &[(&str, &str, u32)] = &[
     ),
 ];
 
-/// Colorful Accordee-style workspace & Agents marks.
-const COLOR_MARKS: &[(&str, &str, u32)] = &[(
-    "brand:icy",
-    r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#f472b6"/><stop offset="50%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#38bdf8"/></linearGradient></defs><rect x="1" y="1" width="22" height="22" rx="6" fill="url(#g)"/><path d="M8 8.5v7M11.5 10l4.5 2-4.5 2" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>"##,
-    20,
-)];
+pub fn window_icon() -> Option<winit::window::Icon> {
+    let (rgba, [width, height]) = rasterize_svg(ICY_ICON, 64, 1., false)?;
+    winit::window::Icon::from_rgba(rgba, width, height).ok()
+}
 
 fn cli_svg_bytes(id: &str) -> &'static [u8] {
     match id {
@@ -676,7 +676,7 @@ pub fn rasterize_avatar(path: &std::path::Path, scale: f32) -> Option<Picture> {
 const SPINNER_FRAMES: u32 = 12;
 
 pub fn load_static(scale: f32) -> Vec<Picture> {
-    let mut out = Vec::with_capacity(UI_GLYPHS.len() + COLOR_MARKS.len() + 10);
+    let mut out = Vec::with_capacity(UI_GLYPHS.len() + 11);
     let samples = 32;
     let fade: Vec<_> = (0..samples)
         .flat_map(|x| [255, 255, 255, (x * 255 / (samples - 1)) as u8])
@@ -736,10 +736,8 @@ pub fn load_static(scale: f32) -> Vec<Picture> {
             out.push((format!("glyph:uring-{step}"), rgba, size));
         }
     }
-    for &(name, svg, logical) in COLOR_MARKS {
-        if let Some((rgba, size)) = rasterize_svg(svg, logical, scale, false) {
-            out.push((name.to_string(), rgba, size));
-        }
+    if let Some((rgba, size)) = rasterize_svg(ICY_ICON, 20, scale, false) {
+        out.push(("brand:icy".into(), rgba, size));
     }
     for id in [
         "claude",
@@ -867,6 +865,18 @@ pub fn theme_icon_pictures(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn app_icon_renders_the_ice_with_transparent_corners() {
+        for side in [16, 64, 256] {
+            let (rgba, size) = super::rasterize_svg(super::ICY_ICON, side, 1., false).unwrap();
+            assert_eq!(size, [side, side]);
+            assert_eq!(rgba[3], 0);
+            let ice = ((side / 3 * side + side / 2) * 4) as usize;
+            assert!(rgba[ice + 2] > 0xa0);
+            assert_eq!(rgba[ice + 3], 0xff);
+        }
+    }
+
     #[test]
     fn tab_outline_reaches_the_divider_on_both_sides_without_a_bottom_border() {
         for scale in [1.0, 1.25, 2.0] {

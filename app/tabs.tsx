@@ -60,22 +60,78 @@ function GhostButton(props: {
   );
 }
 
+const tabWidths = signal(new Map<number, number>());
+
+effect(() => {
+  const widths = tabWidths.value;
+  if (widths.size === 0) return;
+  const live = new Set(allWindowIds());
+  const kept = new Map([...widths].filter(([id]) => live.has(id)));
+  if (kept.size !== widths.size) tabWidths.value = kept;
+});
+
+function TabShape(props: { width: () => number; outline?: boolean }): Element {
+  const layout = workspaceTabLayout;
+  const originalWidth = layout.width + layout.overhang * 2;
+  const source = props.outline ? "glyph:workspace-tab-outline" : "glyph:workspace-tab-fill";
+  const color = () => props.outline ? palette().border : palette().appBg;
+  return (
+    <Dynamic value={() => props.width() === originalWidth}
+      style={() => ({ position: "absolute", left: 0, top: 0, width: props.width(), height: layout.height })}>
+      {(original) => original ? (
+        <Image source={source} style={{ width: originalWidth, height: layout.height }} paint={() => ({ color: color() })} />
+      ) : (
+        <Box style={{ grow: 1 }}>
+          {/* Preserve both curve masks at their original size and extend the straight middle. */}
+          <Box style={() => ({
+            position: "absolute", left: layout.capWidth, top: 0, width: props.width() - layout.capWidth * 2,
+            height: props.outline ? layout.stroke : layout.height,
+          })} paint={() => ({ background: color() })} />
+          {[false, true].map((right) => (
+            <Box style={() => ({
+              position: "absolute", left: right ? props.width() - layout.capWidth : 0, top: 0,
+              width: layout.capWidth, height: layout.height, clip: true,
+            })}>
+              <Image source={source} style={{
+                position: "absolute", left: right ? layout.capWidth - originalWidth : 0, top: 0,
+                width: originalWidth, height: layout.height,
+              }} paint={() => ({ color: color() })} />
+            </Box>
+          ))}
+        </Box>
+      )}
+    </Dynamic>
+  );
+}
+
 function TabBar(): Element {
   const layout = workspaceTabLayout;
-  const outlineWidth = layout.width + layout.overhang * 2;
-  const tabStride = layout.width + layout.stripGap;
+  const resize = signal<{ id: number; width: number } | null>(null);
   const tabs = () => overviewOpen2.value ? [] : paneOrder();
+  const widthFor = (id: number) => {
+    const drag = resize.value;
+    return drag?.id === id ? drag.width : tabWidths.value.get(id) ?? layout.width;
+  };
+  const overhang = layout.overhang * 2;
   const contentWidth = () => {
-    const count = tabs().length;
-    return count === 0 ? 0 : (count - 1) * tabStride + outlineWidth;
+    const ids = tabs();
+    return ids.length === 0 ? 0
+      : ids.reduce((width, id) => width + widthFor(id) + layout.stripGap, overhang - layout.stripGap);
   };
   const activeItem = () => {
     if (activeNav.value !== "agents") return undefined;
-    const index = tabs().indexOf(tilingState.value.focusedSession);
-    if (index < 0) return undefined;
     // Scroll the entire outline into view, not just the tab's contents.
-    const start = index * tabStride;
-    return { start, end: start + outlineWidth };
+    let start = 0;
+    for (const id of tabs()) {
+      const width = widthFor(id);
+      if (id === tilingState.value.focusedSession) return { start, end: start + width + overhang };
+      start += width + layout.stripGap;
+    }
+    return undefined;
+  };
+  const outlineWidth = () => {
+    const item = activeItem();
+    return item ? item.end - item.start : layout.width + overhang;
   };
 
   return (
@@ -104,27 +160,27 @@ function TabBar(): Element {
           label="tabs"
           height={spacing.headerHeight}
           activeItem={activeItem}
+          resizing={() => resize.value !== null}
         >
           {/* Replace this span of the divider with a single stroke that starts and ends
               on the divider, so the curves never overlap it or the tab sides. */}
           <Box
             style={() => ({
               position: "absolute", left: activeItem()?.start ?? 0, top: spacing.headerHeight - layout.height,
-              width: outlineWidth, height: layout.height,
+              width: outlineWidth(), height: layout.height,
             })}
             paint={() => ({
               opacity: activeItem() ? 1 : 0,
-              transitions: [springTransition("left"), smoothTransition("opacity", motion.fast)],
+              transitions: resize.value === null
+                ? [springTransition("left"), smoothTransition("opacity", motion.fast)] : [],
             })}
           >
-            <Image source="glyph:workspace-tab-fill" style={{ width: outlineWidth, height: layout.height }}
-              paint={() => ({ color: palette().appBg })} />
-            <Box style={{ position: "absolute", left: 0, top: layout.height - layout.stroke, width: outlineWidth, height: layout.stroke }}
+            <TabShape width={outlineWidth} />
+            <Box style={() => ({
+              position: "absolute", left: 0, top: layout.height - layout.stroke, width: outlineWidth(), height: layout.stroke,
+            })}
               paint={() => ({ background: palette().appBg })} />
-            <Box style={{ position: "absolute", left: 0, top: 0, width: outlineWidth, height: layout.height }}>
-              <Image source="glyph:workspace-tab-outline" style={{ width: outlineWidth, height: layout.height }}
-                paint={() => ({ color: palette().border })} />
-            </Box>
+            <TabShape width={outlineWidth} outline />
           </Box>
           {/* Tabs follow the active workspace's tiling order. */}
           <For
@@ -139,11 +195,19 @@ function TabBar(): Element {
               const tile = () => tileOf(id);
               const isActive = () => activeNav.value === "agents" && tilingState.value.focusedSession === id;
               const hovered = signal(false);
+              const resizeHovered = signal(false);
+              const width = () => widthFor(id);
+              let originalWidth = layout.width;
+              onCleanup(() => {
+                if (resize.value?.id === id) resize.value = null;
+              });
               return (
                 <Row
-                  style={{ width: workspaceTabLayout.width, height: workspaceTabLayout.height,
-                    padding: [0, spacing.unit * 1.5, 0, workspaceTabLayout.gap * 1.5],
-                    align: "center", gap: workspaceTabLayout.gap, shrink: 0 }}
+                  style={() => ({
+                    width: width(), height: layout.height,
+                    padding: [0, layout.resizeHitWidth, 0, layout.gap * 1.5],
+                    align: "center", gap: layout.gap, shrink: 0,
+                  })}
                   onHover={(inside) => {
                     hovered.value = inside;
                   }}
@@ -151,8 +215,10 @@ function TabBar(): Element {
                   onDrag={windowDragHandler(() => id)}
                 >
                   {/* Inactive hover: a floating pill inside the tab, not the connected shape. */}
-                  <Box style={{ position: "absolute", left: spacing.unit / 2, top: spacing.unit,
-                    width: workspaceTabLayout.width - spacing.unit, height: spacing.button }}
+                  <Box style={() => ({
+                    position: "absolute", left: spacing.unit / 2, top: spacing.unit,
+                    width: width() - spacing.unit, height: spacing.button,
+                  })}
                     paint={() => ({
                       radius: radii.md,
                       background: hovered.value && !isActive() ? palette().sidebarActive : 0,
@@ -197,6 +263,42 @@ function TabBar(): Element {
                     })}
                   >
                     <Glyph name="close" size={10} color={() => palette().textMuted} hover={() => palette().textPrimary} />
+                  </Box>
+                  <Box
+                    style={() => ({
+                      position: "absolute", left: width() - layout.resizeHitWidth, top: spacing.unit,
+                      width: layout.resizeHitWidth, height: spacing.button, align: "center", justify: "center",
+                    })}
+                    onHover={(inside) => { resizeHovered.value = inside; }}
+                    onDrag={(event) => {
+                      if (event.phase === "start") {
+                        originalWidth = width();
+                        resize.value = { id, width: originalWidth };
+                        return;
+                      }
+                      const drag = resize.value;
+                      if (drag?.id !== id) return;
+                      const next = Math.max(layout.minWidth, Math.min(layout.maxWidth, Math.round(originalWidth + event.dx)));
+                      if (event.phase === "move") {
+                        if (next !== drag.width) resize.value = { id, width: next };
+                        return;
+                      }
+                      if (next !== (tabWidths.value.get(id) ?? layout.width)) {
+                        const widths = new Map(tabWidths.value);
+                        if (next === layout.width) widths.delete(id);
+                        else widths.set(id, next);
+                        tabWidths.value = widths;
+                      }
+                      resize.value = null;
+                    }}
+                    paint={{ cursor: "colResize" }}
+                  >
+                    <Box style={{ width: workspaceTiling.guideWidth, height: spacing.button - spacing.unit * 2 }}
+                      paint={() => ({
+                        radius: radii.xs, background: accent().brand,
+                        opacity: resize.value?.id === id ? 1 : resizeHovered.value ? workspaceTiling.resizeHoverOpacity : 0,
+                        transitions: [smoothTransition("opacity", motion.fast)],
+                      })} />
                   </Box>
                 </Row>
               );

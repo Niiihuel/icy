@@ -9,7 +9,7 @@ name = "icy"
 path = "src/main.rs"
 
 [dependencies]
-icy-core = { path = "../icy-core" }
+icy-core = { path = "../icy-core", features = ["desktop-window"] }
 jsnir = { path = "../../../Jurui" }
 jsnir-gpu = { path = "../../../Jurui/backends/gpu" }
 pollster = "0.4"
@@ -25,6 +25,9 @@ winit = { version = "=0.30.13", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+
+[build-dependencies]
+embed-resource = "3.0.12"
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "=30.0.1", default-features = false, features = ["dx12"] }

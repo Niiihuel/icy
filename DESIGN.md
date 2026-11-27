@@ -174,7 +174,19 @@ node design/tools/extract-tokens.mjs
 - **Switch & Checkbox:** switch `32x18px`, pill `9999px` (`--ac-kbd-bg` off → `--ac-brand` on); checkbox `16x16px`, radio `4px–5px`, `focus-visible` con `outline: 2px solid #8b5cf6; outline-offset: 2px`.
 - **Avatars:** `18x18px` circular (`9999px`) con borde `1.5px solid var(--ac-app-bg)`.
 
+### Ícono de la aplicación
+
+Tres carámbanos asimétricos forman una sola silueta. Las facetas usan `textPrimary` y el azul de Accordee. El fondo redondeado combina `panelBg` y `appBg` del tema oscuro. El SVG se usa en Settings, la ventana y el lanzador de Linux. El ejecutable de Windows lleva una versión ICO de 16 a 256 px. [Ícono vectorial](assets/icons/icy.svg)
+
+El ICO se regenera a partir del SVG con este comando.
+
+```bash
+rsvg-convert -w 256 -h 256 assets/icons/icy.svg |
+  magick png:- -define icon:auto-resize=256,128,64,48,32,24,16 assets/icons/icy.ico
+```
+
 ### Chrome de página (`app/tabs.tsx`)
+
 - El header de 44 px reúne el acceso a Workspaces, la tira horizontal de pestañas del workspace activo y el botón `+` que abre la paleta. La cabecera usa el fondo del sidebar. El divisor bajo las pestañas se une a los laterales y a las esquinas inferiores del área de contenido en un trazo de `1px`. La pestaña activa comparte el fondo del contenido y su contorno se une al divisor. New session está en el sidebar. El aviso de actualización aparece junto al pie del sidebar y usa un ícono en el rail.
 
 ### Estados vacíos
@@ -192,7 +204,7 @@ node design/tools/extract-tokens.mjs
 
 ### Pestañas y panes estilo Silica (dqhieu/Silica)
 - **Pestaña conectada en línea:** un solo contorno SVG de `1px` reemplaza el tramo correspondiente de la línea inferior del header. Las esquinas superiores y las curvas cóncavas inferiores tienen radio `8px`; no hay borde debajo de la pestaña. El contorno se rasteriza a la escala de pantalla y se desliza entre pestañas con el resorte de layout. Referencias: [trazados SVG en MDN](https://developer.mozilla.org/en-US/docs/Web/SVG/Tutorials/SVG_from_scratch/Paths) y [contorno de pestaña en Chromium](https://chromium.googlesource.com/chromium/src/+/main/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc). Las inactivas se atenúan (título `textMuted`, ícono al `55%`) y en hover muestran una pastilla `sidebarActive` flotante de `30px`. El sidebar de proyectos usa los mismos estados: sesión activa con borde de línea, hover con pastilla y el resto atenuado; el proyecto de la sesión enfocada va en `textPrimary`.
-- Las pestañas miden 156 px y la tira muestra la activa al cambiar de sesión. Una terminal de shell usa el nombre de la carpeta. La pestaña activa muestra el botón de cierre y las demás lo muestran al pasar el puntero.
+- Las pestañas miden 156 px por defecto. Arrastrá el borde derecho para ajustar una pestaña entre 96 y 400 px. El borde muestra el cursor de ajuste y una línea de acento. Cada pestaña conserva su ancho mientras la ventana de icy siga abierta. La tira desplaza la pestaña activa a la vista al cambiar de sesión. Una terminal de shell usa el nombre de la carpeta. La pestaña activa muestra el botón de cierre y las demás lo muestran al pasar el puntero.
 - Las pestañas y la fila de CLIs comparten el desplazamiento horizontal. Cuando la tira desborda, cada flecha ocupa un espacio propio junto al contenido recortado y se anima con el resorte del tiling. Se puede avanzar con las flechas, el gesto horizontal del touchpad o Shift + rueda. Al llegar al extremo, la flecha queda atenuada y deshabilitada hasta que el puntero la deja.
 - **Panes como cards:** radio `10px`, `appBg`, borde `.5px` (`border`; el enfocado usa `ring` + sombra `card` en vez de un borde de acento). Header `30px`: ícono del CLI `14px`, título `13px` y, al hover o con foco, `Fullscreen pane` y `Close` (botones `24px` con tooltip y atajo). Para apilar una shell debajo se usa el atajo `Split terminal down`. Para apilar una ventana abierta se puede arrastrar a la mitad inferior de un pane.
 - El resize por arrastre muestra una línea de acento de 2 px en el borde y mueve las ventanas sin resortes mientras sigue el puntero. Tanto la previsualización como el resultado al soltar usan `icy-core`. En los dos modos, el borde compartido reparte el ancho entre las dos columnas vecinas, así que ninguna se desplaza fuera de la vista. En Niri, el borde exterior (antes de la primera columna o después de la última) agranda o achica esa columna.
@@ -388,6 +400,7 @@ Los glyphs de la UI se usan como máscara: se toma la forma del SVG y se pinta c
 
 ## Sidebar: menús y sesiones
 
+- **Terminal** abre una shell nueva en la carpeta del pane activo. En Niri aparece en una columna a la derecha y recibe el foco. El acceso usa el glifo `square-terminal` en el sidebar y en el rail.
 - **Accesos a ventanas:** Files, Review, Metrics y Archived no mantienen fondo activo por estar abiertos, ni en el sidebar expandido ni en el rail. Solo muestran hover real del puntero; el foco pertenece a la pestaña y a la card del tiling. Se conservan sus acciones de abrir/enfocar y los atajos existentes.
 - **Menú de cuenta:** arriba va la identidad, sin interacción: avatar, usuario y `repo · rama · método`. Después van Settings, Themes (abre Appearance) y Release notes. Al final está **Refresh GitHub status**. El pie del sidebar no tiene `⋯` ni una fila Settings.
 - **Release notes:** el ícono de documento con cambios identifica la acción en el menú de cuenta y en el aviso de actualización. El halo del menú sigue el puntero y se desvanece al salir de la fila. La portada a todo el ancho usa una imagen o un video de la release cuando está disponible. Mientras carga la imagen, o en releases sin medios, muestra un arco de luz de líneas finas teñido por el acento activo. La textura se genera una vez al iniciar. La versión, la fecha y las notas quedan debajo. Las acciones permanecen visibles en el pie.

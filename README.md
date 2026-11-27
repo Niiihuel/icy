@@ -84,6 +84,13 @@ Sin `CEF_PATH`, icy busca el runtime junto al ejecutable. Si no lo encuentra, la
 
 Una release incluye los archivos de CEF junto al binario (`libcef.so` o `libcef.dll`, `icudtl.dat`, `*.pak`, `locales/`…), así que quien usa icy no tiene que instalar nada.
 
+El paquete de Linux incluye el lanzador `icy.desktop` y el ícono `icy.svg`. Con `icy` disponible en el `PATH`, registralos desde la carpeta del paquete.
+
+```bash
+install -Dm644 icy.desktop "${XDG_DATA_HOME:-$HOME/.local/share}/applications/icy.desktop"
+install -Dm644 icy.svg "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/icy.svg"
+```
+
 ## Comandos principales
 
 ```bash

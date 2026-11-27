@@ -705,6 +705,7 @@ function ExpandedSidebar(): Element {
 
       {/* Primary navigation */}
       <SidebarNavRow icon="plus" label="New session" onPress={createSession} />
+      <SidebarNavRow icon="square-terminal" label="Terminal" onPress={openTiledColumn} />
       <SidebarNavRow
         icon="folder"
         label="Files"
@@ -965,6 +966,7 @@ function CompactSidebar(): Element {
         icon="plus"
         onPress={createSession}
       />
+      <RailButton label="Terminal" icon="square-terminal" keys={() => keysFor("column.new")} onPress={openTiledColumn} />
       <RailButton label="Files" icon="folder" onPress={toggleFiles} />
       <RailButton label="Add project folder" icon="folder-open" onPress={() => showProjectDialog("add")} />
       <RailButton label="Git" icon="git-branch" onPress={openReviewTab} />

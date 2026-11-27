@@ -67,21 +67,24 @@ function HorizontalStrip(props: {
   // Strip height; the header uses its full height so connected tabs can reach its bottom line.
   height?: number;
   activeItem?: () => StripItemBounds | undefined;
+  resizing?: () => boolean;
   children: Children;
 }): Element {
   const height = props.height ?? spacing.button;
   const viewport = signal(0);
   const offset = signal(0);
   const smooth = signal(false);
+  const resizeGutter = signal<number | null>(null);
   let viewportId: number | undefined;
   let layoutGeneration = 0;
 
   const overflows = () => viewport.value > 0 && props.contentWidth() - viewport.value > spacing.hairline;
   // Keep the controls outside the clipping area, so neither an outdated measurement nor
   // an in-flight animation can paint over a tab title.
-  const gutter = () => overflows() ? Math.min(horizontalStripLayout.controlWidth, viewport.value / 3) : 0;
+  const measuredGutter = () => overflows() ? Math.min(horizontalStripLayout.controlWidth, viewport.value / 3) : 0;
+  const gutter = () => resizeGutter.value ?? measuredGutter();
   const visibleWidth = () => Math.max(0, viewport.value - gutter() * 2);
-  const maxOffset = () => overflows() ? Math.max(0, props.contentWidth() - visibleWidth()) : 0;
+  const maxOffset = () => gutter() > 0 ? Math.max(0, props.contentWidth() - visibleWidth()) : 0;
   const scrollOffset = () => Math.min(offset.value, maxOffset());
 
   const measure = () => {
@@ -118,11 +121,17 @@ function HorizontalStrip(props: {
     void viewportSize.value;
     void sidebarCompact.value;
     void props.contentWidth();
-    const active = props.activeItem?.();
     const generation = ++layoutGeneration;
+    if (props.resizing?.()) {
+      // Keep the scroll controls in place while the tab edge follows the pointer.
+      if (resizeGutter.value === null) resizeGutter.value = measuredGutter();
+      return;
+    }
+    const active = props.activeItem?.();
     afterView(horizontalStripLayout.layoutDelay, () => {
       if (generation !== layoutGeneration) return;
       measure();
+      resizeGutter.value = null;
       syncLayout(active);
     });
     // The sidebar width itself animates, so the first layout can precede the final clip.

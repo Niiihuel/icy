@@ -20,6 +20,22 @@ use windows as os;
 
 pub use desktop_notifications::{DesktopNotification, DesktopNotifier};
 
+#[cfg(feature = "desktop-window")]
+pub fn desktop_window_attributes(
+    attributes: winit::window::WindowAttributes,
+    icon: Option<winit::window::Icon>,
+) -> winit::window::WindowAttributes {
+    #[cfg(target_os = "linux")]
+    let attributes =
+        winit::platform::wayland::WindowAttributesExtWayland::with_name(attributes, "icy", "icy");
+    #[cfg(windows)]
+    let attributes = winit::platform::windows::WindowAttributesExtWindows::with_taskbar_icon(
+        attributes,
+        icon.clone(),
+    );
+    attributes.with_window_icon(icon)
+}
+
 pub fn has_wayland_surface(window: &impl raw_window_handle::HasWindowHandle) -> bool {
     window.window_handle().is_ok_and(|handle| {
         matches!(

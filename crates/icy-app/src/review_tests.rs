@@ -35,6 +35,99 @@ fn workspaces_button_draws_the_grid_glyph() {
 }
 
 #[test]
+fn right_edge_resizes_the_tab_without_moving_its_pane() {
+    use jsnir::{editor::PointSelection, host::Cursor};
+
+    const OUTLINE: [u8; 4] = [1, 2, 3, 255];
+    const NEXT_TAB: [u8; 4] = [4, 5, 6, 255];
+    let (tx, rx) = mpsc::channel();
+    let mut host = Host::with_request_handler(
+        format!("{APP}\nmount(TabBar);"),
+        "{}".into(),
+        TextEngine::default(),
+        move |raw| {
+            tx.send(serde_json::from_str::<Value>(&raw).unwrap())
+                .unwrap();
+            Ok("ok".into())
+        },
+    )
+    .unwrap();
+    host.set_reduced_motion(true);
+    install_fonts(&mut host);
+    host.set_image(
+        "glyph:workspace-tab-outline".into(),
+        OUTLINE.to_vec(),
+        [1, 1],
+    );
+    host.set_image("cli:codex".into(), NEXT_TAB.to_vec(), [1, 1]);
+    let mut tiling = Workspaces::empty(TilingMode::Niri);
+    tiling.open_pane(1, false);
+    tiling.open_pane(2, false);
+    tiling.focus_session(1);
+    host.push(json!({ "view": "tiling", "data": tiling.snapshot() }).to_string());
+    host.push(
+        json!({ "view": "sessions", "data": { "activeId": 1, "items": [
+        { "id": 1, "cli": "claude", "title": "First agent", "cwd": "/project", "alive": true },
+        { "id": 2, "cli": "codex", "title": "Second agent", "cwd": "/project", "alive": true },
+    ] } })
+        .to_string(),
+    );
+
+    let picture = |frame: &Frame, color: [u8; 4]| -> [f32; 4] {
+        frame
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Image { image, rect, .. } if image.rgba.as_ref() == color => Some(*rect),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let before = frame(&mut host);
+    let [x, y, w, h] = picture(&before, OUTLINE);
+    let edge = [x + w - 13., y + h / 2.];
+    let next_start = picture(&before, NEXT_TAB)[0];
+    assert_eq!(host.pointer_move(Some(edge)), Cursor::ColResize);
+    host.pointer_down(PointSelection::Place);
+    host.pointer_move(Some([edge[0] + 80., edge[1]]));
+    let during = frame(&mut host);
+    assert_eq!(picture(&during, NEXT_TAB)[0], next_start + 80.);
+    let outline_caps: Vec<_> = during
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Image { image, clip, .. } if image.rgba.as_ref() == OUTLINE => Some(*clip),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outline_caps.len(), 2);
+    assert_eq!(outline_caps[0][0], x);
+    assert_eq!(outline_caps[1][0] + outline_caps[1][2], x + w + 80.);
+    host.pointer_up();
+    assert_eq!(picture(&frame(&mut host), NEXT_TAB)[0], next_start + 80.);
+
+    assert!(tiling.focus_workspace(1));
+    host.push(json!({ "view": "tiling", "data": tiling.snapshot() }).to_string());
+    frame(&mut host);
+    assert!(tiling.focus_workspace(0));
+    host.push(json!({ "view": "tiling", "data": tiling.snapshot() }).to_string());
+    assert_eq!(picture(&frame(&mut host), NEXT_TAB)[0], next_start + 80.);
+
+    assert_eq!(
+        host.pointer_move(Some([edge[0] + 80., edge[1]])),
+        Cursor::ColResize
+    );
+    host.pointer_down(PointSelection::Place);
+    host.pointer_move(Some([edge[0] - 120., edge[1]]));
+    host.pointer_up();
+    assert_eq!(picture(&frame(&mut host), NEXT_TAB)[0], next_start - 60.);
+    assert!(!rx.try_iter().any(|request| matches!(
+        request["type"].as_str(),
+        Some("moveWindow" | "previewScreen" | "selectSession" | "closeSession")
+    )));
+}
+
+#[test]
 fn pixel_blast_follows_empty_workspace_theme_and_input() {
     use crate::pixel_blast::{PixelBlast, Slot};
 
@@ -2174,6 +2267,7 @@ fn open_tiles_do_not_highlight_sidebar_launchers() {
         let marker = [1, 2, 3, 255];
         host.set_image("glyph:git-branch".into(), marker.to_vec(), [1, 1]);
         host.set_image("glyph:dashboard".into(), marker.to_vec(), [1, 1]);
+        host.set_image("glyph:square-terminal".into(), marker.to_vec(), [1, 1]);
         let rendered = frame(&mut host);
         let icons: Vec<_> = rendered
             .items
@@ -2183,7 +2277,7 @@ fn open_tiles_do_not_highlight_sidebar_launchers() {
                 _ => None,
             })
             .collect();
-        assert_eq!(icons.len(), 2);
+        assert_eq!(icons.len(), 3);
         for icon in icons {
             let x = icon[0] + icon[2] / 2.;
             let y = icon[1] + icon[3] / 2.;
@@ -2200,9 +2294,11 @@ fn sidebar_windows_open_to_the_right_and_take_focus() {
     use jsnir::editor::PointSelection;
 
     let cwd = tempfile::tempdir().unwrap();
+    let project = cwd.path().join("project with spaces");
+    std::fs::create_dir(&project).unwrap();
     let mut manager = SessionManager::new(cwd.path().into(), Arc::new(|| {}));
     manager.tiling = Workspaces::empty(TilingMode::Niri);
-    let first = manager.open_tile(false, cwd.path().into());
+    let first = manager.open_tile(false, project.clone());
     manager.toggle_maximize();
     let manager = Arc::new(Mutex::new(manager));
     let push_layout = |host: &mut Host| {
@@ -2221,7 +2317,9 @@ fn sidebar_windows_open_to_the_right_and_take_focus() {
         Host::with_request_handler(script, "{}".into(), TextEngine::default(), move |raw| {
             let payload: Value = serde_json::from_str(&raw).unwrap();
             match payload["type"].as_str() {
-                Some("openTile" | "selectSession") => handle_request(&raw, &requests, &events),
+                Some("openTile" | "openColumn" | "selectSession") => {
+                    handle_request(&raw, &requests, &events)
+                }
                 _ => Ok("ok".into()),
             }
         })
@@ -2231,7 +2329,7 @@ fn sidebar_windows_open_to_the_right_and_take_focus() {
     push_layout(&mut host);
 
     let mut expected = vec![first];
-    for label in ["Git", "Files", "Browser", "Git"] {
+    for label in ["Git", "Files", "Browser", "Terminal", "Terminal", "Git"] {
         let sidebar = frame(&mut host);
         let [x, y, w, h] = sidebar
             .items
@@ -2250,7 +2348,7 @@ fn sidebar_windows_open_to_the_right_and_take_focus() {
 
         {
             let manager = manager.lock().unwrap();
-            if label == "Git" && expected.len() == 4 {
+            if label == "Git" && expected.len() > 1 {
                 assert_eq!(
                     manager.active_id(),
                     expected[1],
@@ -2263,6 +2361,29 @@ fn sidebar_windows_open_to_the_right_and_take_focus() {
                     *expected.last().unwrap(),
                     "focus the new {label} window"
                 );
+                if label == "Terminal" {
+                    let terminal = manager.focused_terminal().unwrap();
+                    assert_eq!(terminal.cwd(), project);
+                    assert!(terminal.is_alive());
+                    let marker = format!("ICY_SIDEBAR_READY_{}", terminal.id);
+                    terminal
+                        .write_input(format!("echo {marker}\r").as_bytes())
+                        .unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(8);
+                    while !terminal
+                        .frame()
+                        .0
+                        .rows
+                        .iter()
+                        .any(|row| row.plain_text().trim() == marker)
+                    {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the sidebar shell did not execute the command"
+                        );
+                        std::thread::sleep(Duration::from_millis(15));
+                    }
+                }
             }
             assert!(manager.tiling.is_maximized());
             assert_eq!(manager.tiling.pane_order(), expected);

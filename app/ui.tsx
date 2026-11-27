@@ -561,8 +561,8 @@ const githubState = signal<GitHubView>({
 });
 
 const updateState = signal<UpdateView>({
-  currentVersion: "0.1.0",
-  availableVersion: "0.1.0",
+  currentVersion: "0.1.1",
+  availableVersion: "0.1.1",
   hasUpdate: false,
   stage: "idle",
   progress: 0,
@@ -570,7 +570,7 @@ const updateState = signal<UpdateView>({
   assetUrl: null,
   stagedPath: null,
   notes: {
-    version: "0.1.0",
+    version: "0.1.1",
     title: "icy",
     publishedAt: "Latest",
     summary: "",

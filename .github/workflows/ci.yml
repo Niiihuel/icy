@@ -197,6 +197,7 @@ jobs:
           done
           # The Linux CEF distribution ships libcef.so with debug info (~1.3 GB); stripped it is ~240 MB.
           if [ "${{ matrix.kind }}" = unix ]; then
+            cp icy/assets/linux/icy.desktop icy/assets/icons/icy.svg "$dist/"
             strip --strip-unneeded "$dist/libcef.so" "$dist/$(basename "${{ matrix.bin }}")"
           fi
 

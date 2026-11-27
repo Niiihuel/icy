@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=icy
+Comment=Terminal workspace for coding agents
+Comment[es]=Espacio de trabajo de terminales para agentes de código
+Exec=icy
+TryExec=icy
+Icon=icy
+StartupWMClass=icy
+Terminal=false
+Categories=Development;IDE;
+Keywords=Terminal;Agents;CLI;IDE;

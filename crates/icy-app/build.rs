@@ -86,6 +86,14 @@ fn main() {
         .expect("workspace root");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
 
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=icy.rc");
+        println!("cargo:rerun-if-changed=../../assets/icons/icy.ico");
+        embed_resource::compile_for("icy.rc", ["icy"], embed_resource::NONE)
+            .manifest_required()
+            .expect("embed the icy executable icon");
+    }
+
     println!("cargo:rerun-if-env-changed=JSNIR_TSC");
     // libcef.so is loaded from the executable's folder, or from the CEF runtime dir.
     println!("cargo:rerun-if-env-changed=CEF_PATH");

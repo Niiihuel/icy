@@ -5,7 +5,7 @@ use crate::pixel_blast::PixelBlast;
 use crate::window_surface::Surface;
 use icy_core::config::IcyConfig;
 use icy_core::keybinds::{Chord, Keymap, canonical_key};
-use icy_core::platform::editor_command_modifier;
+use icy_core::platform::{desktop_window_attributes, editor_command_modifier};
 use icy_core::vt::{CellPoint, SelectKind, modified_enter};
 use jsnir::{
     editor::{EditorEvent, PointSelection},
@@ -1361,11 +1361,12 @@ impl ApplicationHandler for AppWindow {
         }
         let [width, height] = self.size;
         let window = events
-            .create_window(
+            .create_window(desktop_window_attributes(
                 Window::default_attributes()
                     .with_title(&self.title)
                     .with_inner_size(LogicalSize::new(width, height)),
-            )
+                crate::icons::window_icon(),
+            ))
             .map_err(Box::from)
             .and_then(|window| Surface::open(&events.owned_display_handle(), Arc::new(window)));
         match window {

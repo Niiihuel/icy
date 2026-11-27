@@ -905,11 +905,16 @@ impl SessionManager {
             args.push(text.to_string());
         }
 
+        let (program, args) = if cli.id == "pi" {
+            platform::pi_launch_command(cli.command.clone(), args, &cwd)
+        } else {
+            (cli.command.clone(), args)
+        };
         let spawned = self.spawn_terminal(TerminalSpawn {
             id,
             title: cli.name.clone(),
             cwd: cwd.clone(),
-            program: cli.command.clone(),
+            program,
             args,
             size,
             cli_hint: Some(cli.id),
@@ -4635,6 +4640,7 @@ mod tests {
         }
 
         let mut cfg = IcyConfig::default();
+        cfg.clis.truncate(6);
         let usage: Vec<Value> = cfg
             .clis
             .iter()

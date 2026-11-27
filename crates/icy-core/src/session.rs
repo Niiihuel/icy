@@ -438,27 +438,42 @@ fn feed_with_graphics(
 /// Maps a foreground argv (NUL-separated) to a known agent CLI id. Checks the program and, for
 /// script launchers (`node`, `bun`, `python`), its first argument.
 pub fn cli_from_cmdline(cmdline: &str) -> Option<&'static str> {
-    cmdline
-        .split('\0')
-        .filter(|a| !a.is_empty())
-        .take(2)
-        .find_map(|arg| {
-            let base = arg.rsplit(['/', '\\']).next().unwrap_or(arg);
-            let base = base
-                .strip_suffix(".exe")
-                .or_else(|| base.strip_suffix(".js"))
-                .unwrap_or(base);
-            match base {
-                "claude" => Some("claude"),
-                "codex" => Some("codex"),
-                "gemini" => Some("gemini"),
-                "grok" | "grok-build" => Some("grok"),
-                "opencode" | "opencode2" | "open-code" => Some("opencode"),
-                "junie" => Some("junie"),
-                "agy" | "antigravity" | "antigravity-cli" => Some("antigravity"),
-                _ => None,
-            }
+    let mut args = cmdline.split('\0').filter(|arg| !arg.is_empty());
+    let program = args.next()?;
+    let script = args.next();
+    if cli_program_name(program) == "pi"
+        || (matches!(cli_program_name(program), "node" | "nodejs" | "bun")
+            && script.is_some_and(is_pi_script))
+    {
+        return Some("pi");
+    }
+    std::iter::once(program)
+        .chain(script)
+        .find_map(|arg| match cli_program_name(arg) {
+            "claude" => Some("claude"),
+            "codex" => Some("codex"),
+            "gemini" => Some("gemini"),
+            "grok" | "grok-build" => Some("grok"),
+            "opencode" | "opencode2" | "open-code" => Some("opencode"),
+            "junie" => Some("junie"),
+            "agy" | "antigravity" | "antigravity-cli" => Some("antigravity"),
+            _ => None,
         })
+}
+
+fn cli_program_name(path: &str) -> &str {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".js"))
+        .unwrap_or(name)
+}
+
+fn is_pi_script(path: &str) -> bool {
+    matches!(cli_program_name(path), "pi" | "pi-launcher")
+        || (cli_program_name(path) == "cli"
+            && path
+                .rsplit(['/', '\\'])
+                .any(|part| part == "pi-coding-agent"))
 }
 
 fn is_shell(cmd: &str) -> bool {
@@ -483,6 +498,10 @@ fn is_shell(cmd: &str) -> bool {
 }
 
 fn infer_cli_kind(title: &str) -> String {
+    // Pi uses a leading π before the optional session name and directory.
+    if title == "π" || title.starts_with("π - ") {
+        return "pi".into();
+    }
     let lower = title.to_ascii_lowercase();
     if lower.contains("claude") {
         "claude".into()
@@ -521,6 +540,22 @@ mod tests {
         assert_eq!(cli_from_cmdline("/usr/bin/fish\0"), None);
         assert_eq!(cli_from_cmdline("python3\0script.py\0codex\0"), None);
         assert_eq!(cli_from_cmdline(""), None);
+    }
+
+    #[test]
+    fn identifies_pi_without_matching_unrelated_scripts_and_titles() {
+        for command in [
+            "/usr/bin/pi\0--resume\0",
+            "node\0/home/user/.pi/bin/pi-launcher.js\0",
+            "node\0/usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js\0",
+            "node.exe\0C:\\tools\\node_modules\\@mariozechner\\pi-coding-agent\\dist\\cli.js\0",
+        ] {
+            assert_eq!(cli_from_cmdline(command), Some("pi"));
+        }
+        assert_eq!(cli_from_cmdline("vim\0pi\0"), None);
+        assert_eq!(cli_from_cmdline("node\0/project/dist/cli.js\0"), None);
+        assert_eq!(infer_cli_kind("π - Test - codex"), "pi");
+        assert_eq!(infer_cli_kind("pipeline"), "terminal");
     }
 
     #[test]

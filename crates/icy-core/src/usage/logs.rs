@@ -22,7 +22,21 @@ pub(super) fn collect(home: Option<&Path>, today: Day) -> UsageSnapshot {
         .map(PathBuf::from)
         .or_else(|| home.map(|home| home.join(".local/share")));
 
-    let readers: [(&str, Option<PathBuf>, Reader); 5] = [
+    let pi_path = |variable| {
+        let value = std::env::var_os(variable).filter(|value| !value.is_empty())?;
+        let path = PathBuf::from(value);
+        match path.strip_prefix("~") {
+            Ok(rest) => Some(home?.join(rest)),
+            Err(_) => Some(path),
+        }
+    };
+    let pi_sessions = pi_path("PI_CODING_AGENT_SESSION_DIR").or_else(|| {
+        pi_path("PI_CODING_AGENT_DIR")
+            .or_else(|| home.map(|home| home.join(".pi/agent")))
+            .map(|agent| agent.join("sessions"))
+    });
+
+    let readers: [(&str, Option<PathBuf>, Reader); 6] = [
         ("claude", home.map(|p| p.join(".claude/projects")), claude),
         (
             "antigravity",
@@ -36,6 +50,7 @@ pub(super) fn collect(home: Option<&Path>, today: Day) -> UsageSnapshot {
             data_home.map(|p| p.join("opencode/opencode.db")),
             opencode,
         ),
+        ("pi", pi_sessions, pi),
     ];
 
     UsageSnapshot {
@@ -53,7 +68,7 @@ pub(super) fn collect(home: Option<&Path>, today: Day) -> UsageSnapshot {
     }
 }
 
-pub(super) fn entries(path: &Path, dirs: bool) -> impl Iterator<Item = DirEntry> {
+pub(super) fn entries(path: &Path, dirs: bool) -> impl Iterator<Item = DirEntry> + use<> {
     fs::read_dir(path)
         .into_iter()
         .flatten()
@@ -65,7 +80,7 @@ pub(super) fn entries(path: &Path, dirs: bool) -> impl Iterator<Item = DirEntry>
         })
 }
 
-pub(super) fn jsonl_files(path: &Path) -> impl Iterator<Item = PathBuf> {
+pub(super) fn jsonl_files(path: &Path) -> impl Iterator<Item = PathBuf> + use<> {
     entries(path, false)
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
@@ -108,6 +123,63 @@ fn fields(value: &Value, input: &str, output: &str, cached: &str) -> Option<Toke
         cached: value[cached].as_u64().unwrap_or_default().min(input),
         calls: 1,
     })
+}
+
+fn pi(root: &Path, history: &mut AgentHistory) {
+    let paths =
+        jsonl_files(root).chain(entries(root, true).flat_map(|dir| jsonl_files(&dir.path())));
+    let mut seen = HashSet::new();
+    for path in paths {
+        let mut started = None;
+        let mut dates = SessionDays::new();
+        jsonl(&path, &["\"session\"", "\"usage\""], |record| {
+            let Some(at) = timestamp(&record["timestamp"], history.today) else {
+                return;
+            };
+            let message = match record["type"].as_str() {
+                Some("session") => {
+                    started = Some(at);
+                    return;
+                }
+                Some("message") if record["message"]["role"] == "assistant" => &record["message"],
+                Some("usage" | "compaction" | "branch_summary") => record,
+                _ => return,
+            };
+            let Some(started) = started else { return };
+            let usage = &message["usage"];
+            let cached = usage["cacheRead"].as_u64().unwrap_or_default();
+            let input = usage["input"]
+                .as_u64()
+                .unwrap_or_default()
+                .saturating_add(cached)
+                .saturating_add(usage["cacheWrite"].as_u64().unwrap_or_default());
+            let output = usage["output"].as_u64().unwrap_or_default();
+            if input == 0 && output == 0 {
+                return;
+            }
+
+            // A fork can copy its parent's entries, preserving IDs and timestamps.
+            if at >= started {
+                dates.insert(day(at));
+            }
+            if let Some(id) = record["id"].as_str()
+                && !seen.insert((at, id.to_owned()))
+            {
+                return;
+            }
+            history.record_tokens(
+                at,
+                message["model"].as_str(),
+                Tokens {
+                    input,
+                    output,
+                    cached,
+                    calls: 1,
+                },
+            );
+        });
+        history.record_session(dates);
+    }
 }
 
 fn claude(root: &Path, history: &mut AgentHistory) {
@@ -495,6 +567,53 @@ fn millis(ms: i64, today: Day) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_counts_usage_without_recounting_forked_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("--project--");
+        fs::create_dir(&project).unwrap();
+        let response = r#"{"type":"message","id":"reply","timestamp":"2026-11-20T03:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-4-5","usage":{"input":11,"output":12,"cacheRead":13,"cacheWrite":14}}}"#;
+        fs::write(
+            project.join("original.jsonl"),
+            format!(
+                "{}\n{response}\n",
+                r#"{"type":"session","id":"original","timestamp":"2026-11-20T03:00:00.000Z"}"#,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("fork.jsonl"),
+            format!(
+                "{}\n{response}\n{}\n{}\n{{\"type\":",
+                r#"{"type":"session","id":"fork","parentSession":"original.jsonl","timestamp":"2026-11-21T10:00:00.000Z"}"#,
+                r#"{"type":"compaction","id":"summary","timestamp":"2026-11-21T10:00:01.000Z","model":"claude-sonnet-4-5","usage":{"input":20,"output":5,"cacheRead":30}}"#,
+                r#"{"type":"usage","id":"warm","timestamp":"2026-11-21T10:00:02.000Z","model":"claude-sonnet-4-5","usage":{"cacheRead":40}}"#,
+            ),
+        )
+        .unwrap();
+
+        let today = day(DateTime::parse_from_rfc3339("2026-11-21T00:00:00Z")
+            .unwrap()
+            .to_utc());
+        let mut history = AgentHistory::new(today);
+        pi(root.path(), &mut history);
+        let data = history.finish("pi");
+        assert_eq!(data.periods[0].current, 2);
+        assert_eq!(data.days.len(), 2);
+        let original = &data.days[0];
+        assert_eq!(original.sessions, 1);
+        assert_eq!(original.tokens.input, 38);
+        assert_eq!(original.tokens.cached, 13);
+        assert_eq!(original.tokens.output, 12);
+        assert_eq!(original.tokens.calls, 1);
+        let fork = &data.days[1];
+        assert_eq!(fork.sessions, 1);
+        assert_eq!(fork.tokens.input, 90);
+        assert_eq!(fork.tokens.cached, 70);
+        assert_eq!(fork.tokens.output, 5);
+        assert_eq!(fork.models[0].provider, "anthropic");
+    }
 
     #[test]
     fn codex_counts_unique_sessions_and_ignores_repeated_token_totals() {

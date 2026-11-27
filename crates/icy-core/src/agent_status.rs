@@ -226,6 +226,13 @@ pub(crate) fn fallback(
                 return progress;
             }
         }
+        "pi" if tail.iter().any(|line| {
+            line.trim_start().starts_with(braille)
+                && (line.contains("(esc to interrupt)") || line.contains("(escape to interrupt)"))
+        }) =>
+        {
+            return Working;
+        }
         _ => {}
     }
     Idle

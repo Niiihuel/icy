@@ -137,6 +137,7 @@ const CLI_NAMES: Record<string, string> = {
   antigravity: "Antigravity",
   grok: "Grok CLI",
   opencode: "OpenCode",
+  pi: "Pi",
 };
 
 // Ring and bar colour by how close a limit is to running out.

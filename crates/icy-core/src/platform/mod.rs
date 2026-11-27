@@ -183,6 +183,17 @@ pub fn default_shell() -> (String, Vec<String>) {
     os::default_shell()
 }
 
+/// Resolve a Pi package-manager launcher before handing it to the PTY.
+pub fn pi_launch_command(program: String, args: Vec<String>, cwd: &Path) -> (String, Vec<String>) {
+    #[cfg(windows)]
+    if let Some((executable, script)) = windows::pi_launcher(&program, cwd) {
+        return (executable, script.into_iter().chain(args).collect());
+    }
+    #[cfg(unix)]
+    let _ = cwd;
+    (program, args)
+}
+
 /// Returns a cross-platform shell invocation that prints `message` and exits.
 pub fn echo_command(message: &str) -> (String, Vec<String>) {
     os::echo_command(message)

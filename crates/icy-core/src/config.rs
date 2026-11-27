@@ -143,7 +143,20 @@ pub fn default_clis() -> Vec<CliConfig> {
             auto_detect: true,
             description: "Open-source terminal coding agent".into(),
         },
+        pi_cli(),
     ]
+}
+
+fn pi_cli() -> CliConfig {
+    CliConfig {
+        id: "pi".into(),
+        name: "Pi".into(),
+        command: "pi".into(),
+        args: Vec::new(),
+        enabled: true,
+        auto_detect: true,
+        description: "Extensible terminal coding agent".into(),
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,7 +363,11 @@ pub fn load_config_from(path: &Path) -> IcyConfig {
         let _ = save_config_to(path, &cfg);
         return cfg;
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    let mut cfg: IcyConfig = serde_json::from_str(&raw).unwrap_or_default();
+    if !cfg.clis.iter().any(|cli| cli.id == "pi") {
+        cfg.clis.push(pi_cli());
+    }
+    cfg
 }
 
 pub fn save_config(cfg: &IcyConfig) -> std::io::Result<()> {
@@ -586,6 +603,26 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&builtin_theme_files()[0]).unwrap())
                 .unwrap();
         assert_eq!(resolve_colors(&parsed.colors, true).selection, None);
+    }
+
+    #[test]
+    fn adds_pi_to_existing_configs_and_keeps_user_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut existing = IcyConfig::default();
+        existing.clis.retain(|cli| cli.id != "pi");
+        existing.clis[0].enabled = false;
+        save_config_to(&path, &existing).unwrap();
+
+        let mut loaded = load_config_from(&path);
+        assert_eq!(&loaded.clis[..existing.clis.len()], &existing.clis);
+        let pi = loaded.clis.last_mut().unwrap();
+        assert_eq!(*pi, pi_cli());
+        pi.enabled = false;
+        pi.command = "custom-pi".into();
+        pi.args = vec!["--no-extensions".into()];
+        save_config_to(&path, &loaded).unwrap();
+        assert_eq!(load_config_from(&path), loaded);
     }
 
     #[test]

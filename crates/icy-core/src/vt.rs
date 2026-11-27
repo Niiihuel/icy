@@ -377,7 +377,7 @@ impl VtEngine for AlacrittyVt {
         let mut tail = Vec::new();
         if matches!(
             cli,
-            "opencode" | "antigravity" | "grok" | "codex" | "claude" | "junie"
+            "opencode" | "antigravity" | "grok" | "codex" | "claude" | "junie" | "pi"
         ) {
             let grid = self.term.grid();
             // Read live coordinates, not renderable_content(), which follows the user's scrollback.
@@ -852,6 +852,41 @@ mod tests {
         vt.feed(b"\x1b]133;A\x07");
         assert_eq!(vt.agent_status("opencode", ""), AgentStatus::Idle);
         assert!(vt.snapshot().rows[0].plain_text().is_empty());
+    }
+
+    #[test]
+    fn pi_receives_program_status_support_before_the_da1_reply() {
+        let replies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = replies.clone();
+        let mut vt = AlacrittyVt::with_callbacks(
+            60,
+            10,
+            VtCallbacks {
+                on_pty_write: Some(std::sync::Arc::new(move |reply| {
+                    captured.lock().unwrap().extend_from_slice(reply)
+                })),
+                ..Default::default()
+            },
+        );
+        vt.feed(b"\x1b[?u\x1b]7501;?\x1b\\\x1b[c");
+        let reply = replies.lock().unwrap();
+        assert!(reply.starts_with(agent_status::STATUS_REPLY));
+        assert!(reply.ends_with(b"\x1b[?6c"));
+        drop(reply);
+
+        for (state, expected) in [
+            ("idle", AgentStatus::Idle),
+            ("working", AgentStatus::Working),
+            ("blocked:kind=permission", AgentStatus::Blocked),
+            ("done", AgentStatus::Done),
+            ("error", AgentStatus::Failed),
+        ] {
+            vt.feed(format!("\x1b]7501;app=pi:state={state}\x1b\\").as_bytes());
+            assert_eq!(vt.reported_app(), Some("pi"));
+            assert_eq!(vt.agent_status("pi", "π - project"), expected);
+        }
+        vt.feed(b"\x1b]7501;state=clear\x1b\\");
+        assert_eq!(vt.reported_app(), None);
     }
 
     #[test]

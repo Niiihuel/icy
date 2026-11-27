@@ -17,6 +17,12 @@ Podés cerrar la ventana mientras un agente, una shell o un comando sigue trabaj
 
 El servidor de sesión es local y conserva las terminales mientras sigue en ejecución. `icy --stop-session-server` lo detiene y cierra sus terminales. Si reiniciás el equipo o se detiene el servidor, la recuperación de conversaciones depende de cada CLI.
 
+### Pi
+
+Instalá Pi y dejá `pi` en el `PATH`. Podés iniciarlo desde **Settings → CLIs & Agents → Pi** o escribiendo `pi` en una terminal de icy. Pi conserva sus modelos, extensiones y sesiones. Dentro de Pi, usá `/login` para conectar un proveedor y `/resume` para retomar una conversación. [Instalación y uso de Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent#getting-started)
+
+Las versiones de Pi con OSC 7501 informan cuándo empieza o termina una tarea y cuándo espera una respuesta. **Metrics** muestra los tokens y las sesiones del historial local de Pi. [Estados de terminal de Pi](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/terminal-setup.md#program-status)
+
 ### Notificaciones de agentes
 
 En **Settings → CLIs & Agents → Desktop notifications** podés activar **Task completion** y **Approvals and questions** por separado. Con **Only for background sessions**, icy avisa por otros panes o cuando su ventana pierde el foco. Los avisos incluyen la CLI y la carpeta del proyecto y se entregan mientras icy está abierto, incluso minimizado. Usá **Send test** para comprobar la entrega.

@@ -20,6 +20,100 @@ pub(super) fn default_shell() -> (String, Vec<String>) {
     (comspec, Vec::new())
 }
 
+// ConPTY's CreateProcessW takes an executable. Pi's Windows installers ship a
+// batch shim, so use its JS entry point and pass the prompt as an ordinary argv item.
+pub(super) fn pi_launcher(program: &str, cwd: &Path) -> Option<(String, Option<String>)> {
+    let program = Path::new(program);
+    let name = program.file_name()?.to_str()?;
+    let bare = name.eq_ignore_ascii_case("pi");
+    if !bare && !name.eq_ignore_ascii_case("pi.cmd") {
+        return None;
+    }
+
+    let dirs = if program == Path::new(name) {
+        env::split_paths(&env::var_os("PATH")?).collect()
+    } else {
+        vec![cwd.join(program).parent()?.to_path_buf()]
+    };
+    for dir in dirs {
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            env::current_dir().ok()?.join(dir)
+        };
+        let executable = dir.join("pi.exe");
+        if bare && executable.is_file() {
+            return Some((executable.to_str()?.into(), None));
+        }
+        let shim = dir.join("pi.cmd");
+        if shim.is_file() {
+            let (node, script) = pi_shim_entry(&shim)?;
+            return Some((node, Some(script)));
+        }
+    }
+    None
+}
+
+fn pi_shim_entry(shim: &Path) -> Option<(String, String)> {
+    let dir = shim.parent()?;
+    let managed = dir.join("pi-launcher.js");
+    let (script, node) = if managed.is_file() {
+        let node = fs::read_to_string(shim).ok().and_then(|text| {
+            text.contains(r"%LOCALAPPDATA%\pi-node\current\node.exe")
+                .then_some(())?;
+            let path = PathBuf::from(env::var_os("LOCALAPPDATA")?).join("pi-node/current/node.exe");
+            path.is_file().then_some(path)
+        });
+        (managed, node)
+    } else {
+        let modules = if dir.file_name().is_some_and(|name| name == ".bin") {
+            dir.parent()?.to_path_buf()
+        } else {
+            dir.join("node_modules")
+        };
+        let script = ["@earendil-works", "@mariozechner"]
+            .into_iter()
+            .find_map(|scope| {
+                let package = modules.join(scope).join("pi-coding-agent");
+                let manifest = fs::read_to_string(package.join("package.json")).ok()?;
+                let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+                let script = package.join(manifest["bin"]["pi"].as_str()?);
+                script.is_file().then_some(script)
+            })?;
+        let node = dir.join("node.exe");
+        (script, node.is_file().then_some(node))
+    };
+    let node = node.unwrap_or_else(|| PathBuf::from("node.exe"));
+    Some((node.to_str()?.into(), script.to_str()?.into()))
+}
+
+#[cfg(test)]
+#[test]
+fn launches_pi_windows_installers_with_literal_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("Pi prefix");
+    let entry = cwd.join("node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js");
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::write(
+        cwd.join("node_modules/@earendil-works/pi-coding-agent/package.json"),
+        r#"{"bin":{"pi":"dist/bundle/cli.js"}}"#,
+    )
+    .unwrap();
+    for path in [&entry, &cwd.join("pi.cmd"), &cwd.join("node.exe")] {
+        fs::write(path, "").unwrap();
+    }
+    let prompt = "Keep \"quotes\" & %PATH% literally".to_string();
+    let (node, args) = super::pi_launch_command(r".\pi.cmd".into(), vec![prompt.clone()], &cwd);
+    assert_eq!(Path::new(&node), cwd.join("node.exe"));
+    assert_eq!(Path::new(&args[0]), entry);
+    assert_eq!(args[1..], [prompt]);
+
+    let managed = cwd.join("pi-launcher.js");
+    fs::write(&managed, "").unwrap();
+    let (_, script) = pi_launcher(r".\pi.cmd", &cwd).unwrap();
+    assert_eq!(Path::new(&script.unwrap()), managed);
+}
+
 pub(super) fn foreground_cmdline(_master: &(dyn portable_pty::MasterPty + Send)) -> Option<String> {
     // ConPTY has no foreground-process query; sessions fall back to OSC-title inference.
     None

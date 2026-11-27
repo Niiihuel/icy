@@ -11,6 +11,7 @@ const SVG_CODEX: &[u8] = include_bytes!("../../../assets/icons/clis/codex.svg");
 const SVG_GROK: &[u8] = include_bytes!("../../../assets/icons/clis/grok.svg");
 const SVG_JUNIE: &[u8] = include_bytes!("../../../assets/icons/clis/junie.svg");
 const SVG_OPENCODE: &[u8] = include_bytes!("../../../assets/icons/clis/opencode.svg");
+const SVG_PI: &[u8] = include_bytes!("../../../assets/icons/clis/pi.svg");
 const SVG_GEMINI: &[u8] = include_bytes!("../../../assets/icons/clis/gemini.svg");
 const SVG_GITHUB: &[u8] = include_bytes!("../../../assets/icons/clis/github.svg");
 const SVG_TERMINAL_FALLBACK: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#a3a3a3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 17 11 11 5 5"/><line x1="12" x2="19" y1="19" y2="19"/></svg>"##;
@@ -456,6 +457,7 @@ fn cli_svg_bytes(id: &str) -> &'static [u8] {
         "grok" => SVG_GROK,
         "junie" => SVG_JUNIE,
         "opencode" => SVG_OPENCODE,
+        "pi" => SVG_PI,
         "gemini" => SVG_GEMINI,
         "github" => SVG_GITHUB,
         _ => SVG_TERMINAL_FALLBACK,
@@ -746,6 +748,7 @@ pub fn load_static(scale: f32) -> Vec<Picture> {
         "grok",
         "junie",
         "opencode",
+        "pi",
         "gemini",
         "github",
         "terminal",

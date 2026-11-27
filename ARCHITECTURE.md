@@ -102,7 +102,7 @@ Para que cualquier CLI funcione sin integraciones propietarias, `icy` combina cu
 - **Detección de estado de agentes:** incorporar manifiestos TOML al estilo `herdr` (`Idle` / `Working` / `Blocked`) + `OSC 7501` y tracking de `cwd` vía `OSC 7`.
 - **To-dos por sesión:** extraer listas de tareas directamente de los hooks/transcripts de agentes y mostrarlas sincronizadas junto al pane.
 - **Editor de código dedicado en JSNIR:** ampliar la edición nativa con tabs sin normalización, resaltado durante la escritura y virtualización del buffer editable.
-- **Métricas de agentes (Fase 5):** lector de logs JSONL (`~/.claude/projects`, Codex, OpenCode, etc.) para poblar tarjetas KPI (tokens input/output, tareas, tiempo activo), barras diarias, heatmap semanal por hora y ranking por modelo/agente.
+- **Métricas de agentes (Fase 5):** lectores de historial local para poblar tarjetas KPI, barras diarias, heatmap semanal por hora y ranking por modelo o agente. El lector de Pi cuenta tokens y sesiones de `~/.pi/agent/sessions` y respeta `PI_CODING_AGENT_DIR` y `PI_CODING_AGENT_SESSION_DIR`. Identifica las entradas copiadas entre una sesión y su fork por ID y timestamp. [Formato de sesiones de Pi](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md)
 
 ---
 

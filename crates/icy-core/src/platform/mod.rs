@@ -8,6 +8,7 @@ use serde::Serialize;
 #[cfg(target_os = "linux")]
 mod background_blur;
 mod desktop_notifications;
+pub mod tray;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -19,6 +20,7 @@ use unix as os;
 use windows as os;
 
 pub use desktop_notifications::{DesktopNotification, DesktopNotifier};
+pub use tray::{TrayCallbacks, TrayHandle, TrayIcon, TrayState};
 
 #[cfg(feature = "desktop-window")]
 pub fn desktop_window_attributes(
@@ -275,6 +277,7 @@ pub fn config_dir() -> PathBuf {
 
 pub(crate) use os::{
     connect_session_socket, listen_session_socket, prepare_session_dir, session_server_command,
+    spawn_detached_app,
 };
 
 /// Command line (NUL-separated argv) of the PTY's foreground job, used to recognise which agent
@@ -311,6 +314,10 @@ pub fn reveal_in_file_manager(target: &Path) -> io::Result<()> {
 /// Expected GitHub release artifact stem for the current platform.
 pub fn release_asset_name() -> &'static str {
     os::release_asset_name()
+}
+
+pub(crate) fn background_command(program: &str) -> std::process::Command {
+    os::background_command(program)
 }
 
 /// Stages an OS-native helper that replaces `current_exe` with `staged_bin` and restarts `icy`.

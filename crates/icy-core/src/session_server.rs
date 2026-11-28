@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -39,6 +39,19 @@ enum Role {
     Control,
     Watch,
     Stop,
+    Events,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerEvent {
+    FocusWindow,
+    QuitWindow,
+}
+
+#[derive(Default)]
+pub struct ServerOptions {
+    pub app_executable: Option<PathBuf>,
+    pub tray_icon: Option<platform::TrayIcon>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -200,6 +213,16 @@ impl Client {
         changed: impl Fn() + Send + 'static,
         disconnected: impl FnOnce() + Send + 'static,
     ) -> io::Result<(Arc<Self>, Attachment)> {
+        Self::attach_with_events(dir, executable, changed, disconnected, |_| {})
+    }
+
+    pub fn attach_with_events(
+        dir: &Path,
+        executable: &Path,
+        changed: impl Fn() + Send + 'static,
+        disconnected: impl FnOnce() + Send + 'static,
+        on_event: impl Fn(ServerEvent) + Send + 'static,
+    ) -> io::Result<(Arc<Self>, Attachment)> {
         platform::prepare_session_dir(dir)?;
         let dir = &dir.canonicalize()?;
         let deadline = Instant::now() + CONNECT_TIMEOUT;
@@ -224,6 +247,8 @@ impl Client {
                 let mut child = platform::session_server_command(executable, dir)?
                     .arg("--session-server")
                     .arg(dir)
+                    .arg("--app")
+                    .arg(executable)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -248,11 +273,43 @@ impl Client {
         };
         let attachment = answer(&mut stream)??;
         let mut watcher = connect(dir, Role::Watch)?;
+        let events_stream = connect(dir, Role::Events)
+            .and_then(|mut stream| {
+                answer::<()>(&mut stream)??;
+                Ok(stream)
+            })
+            .ok();
         let client = Arc::new(Self {
             stream: Mutex::new(Some(stream)),
             _window_lock: window_lock,
             directory: dir.clone(),
         });
+        let server_quitting = Arc::new(AtomicBool::new(false));
+        if let Some(mut events) = events_stream {
+            let _ = events.set_recv_timeout(None);
+            let owner = Arc::downgrade(&client);
+            let quitting = Arc::clone(&server_quitting);
+            let _ = thread::Builder::new()
+                .name("icy-session-events".into())
+                .spawn(move || {
+                    while owner.strong_count() > 0 {
+                        match read_frame::<ServerEvent>(&mut events) {
+                            Ok(event) => {
+                                if event == ServerEvent::QuitWindow {
+                                    quitting.store(true, Ordering::Release);
+                                }
+                                if owner.strong_count() > 0 {
+                                    on_event(event);
+                                }
+                                if event == ServerEvent::QuitWindow {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+        }
         let owner = Arc::downgrade(&client);
         thread::Builder::new()
             .name("icy-session-watch".into())
@@ -269,7 +326,8 @@ impl Client {
                         }
                         Ok(_) => {}
                         Err(_) => {
-                            if owner.strong_count() > 0 {
+                            if owner.strong_count() > 0 && !server_quitting.load(Ordering::Acquire)
+                            {
                                 disconnected();
                             }
                             break;
@@ -664,12 +722,101 @@ fn serve_terminal(
     }
 }
 
+#[derive(Default)]
+struct ServerEvents {
+    inner: Mutex<EventQueue>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct EventQueue {
+    seq: u64,
+    last: Option<ServerEvent>,
+    closed: bool,
+}
+
+impl ServerEvents {
+    fn current_seq(&self) -> u64 {
+        self.inner.lock().unwrap().seq
+    }
+
+    fn emit(&self, event: ServerEvent) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.seq = inner.seq.wrapping_add(1);
+        inner.last = Some(event);
+        self.ready.notify_all();
+    }
+
+    fn close(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.closed = true;
+        self.ready.notify_all();
+    }
+
+    fn wait(&self, seen: u64, timeout: Duration) -> Option<(u64, ServerEvent)> {
+        let inner = self.inner.lock().unwrap();
+        let (inner, _) = self
+            .ready
+            .wait_timeout_while(inner, timeout, |queue| !queue.closed && queue.seq == seen)
+            .unwrap();
+        if inner.seq != seen {
+            inner.last.map(|event| (inner.seq, event))
+        } else {
+            None
+        }
+    }
+}
+
+fn snapshot_tray_state(state: &Mutex<State>, windows: &AtomicUsize) -> platform::TrayState {
+    let state = state.lock().unwrap();
+    let total_sessions = state.terminals.len();
+    let active_sessions = state.terminals.values().filter(|s| s.is_alive()).count();
+    platform::TrayState {
+        active_sessions,
+        total_sessions,
+        window_open: windows.load(Ordering::Acquire) > 0,
+    }
+}
+
+struct WindowGuard {
+    state: Arc<Mutex<State>>,
+    windows: Arc<AtomicUsize>,
+    tray: Arc<platform::TrayHandle>,
+}
+
+impl WindowGuard {
+    fn enter(
+        state: Arc<Mutex<State>>,
+        windows: Arc<AtomicUsize>,
+        tray: Arc<platform::TrayHandle>,
+    ) -> Self {
+        windows.fetch_add(1, Ordering::AcqRel);
+        tray.update(snapshot_tray_state(&state, &windows));
+        Self {
+            state,
+            windows,
+            tray,
+        }
+    }
+}
+
+impl Drop for WindowGuard {
+    fn drop(&mut self) {
+        self.windows.fetch_sub(1, Ordering::AcqRel);
+        self.tray
+            .update(snapshot_tray_state(&self.state, &self.windows));
+    }
+}
+
 fn serve_controller(
     mut stream: Stream,
-    state: &Mutex<State>,
+    state: &Arc<Mutex<State>>,
     changes: &Arc<Changes>,
     running: &AtomicBool,
+    windows: &Arc<AtomicUsize>,
+    tray: &Arc<platform::TrayHandle>,
 ) -> io::Result<()> {
+    let _window = WindowGuard::enter(Arc::clone(state), Arc::clone(windows), Arc::clone(tray));
     let attachment = {
         let state = state.lock().unwrap();
         Attachment {
@@ -679,50 +826,64 @@ fn serve_controller(
     };
     reply(&mut stream, Ok(attachment))?;
     while let Ok(request) = read_frame::<Request>(&mut stream) {
-        let mut state = state.lock().unwrap();
-        if !running.load(Ordering::Acquire) {
-            break;
+        let mut tray_dirty = false;
+        {
+            let mut state = state.lock().unwrap();
+            if !running.load(Ordering::Acquire) {
+                break;
+            }
+            match request {
+                Request::SaveLayout(layout) => {
+                    state.layout = Some(layout);
+                    reply(&mut stream, Ok(()))?;
+                }
+                Request::Spawn {
+                    command,
+                    environment,
+                } => {
+                    let result = match state.terminals.entry(command.id) {
+                        std::collections::btree_map::Entry::Occupied(_) => {
+                            Err(io::Error::other("terminal id already exists"))
+                        }
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            let changes = Arc::clone(changes);
+                            command
+                                .start_with_environment(
+                                    Arc::new(move || changes.notify()),
+                                    Some(environment),
+                                )
+                                .map(|session| {
+                                    session.serve_images_on_demand();
+                                    let info = session.info();
+                                    entry.insert(session);
+                                    info
+                                })
+                        }
+                    };
+                    tray_dirty = result.is_ok();
+                    changes.notify();
+                    reply(&mut stream, result)?;
+                }
+                Request::Terminal(id, operation) => {
+                    tray_dirty = matches!(operation, TerminalRequest::Close);
+                    serve_terminal(&mut state, &mut stream, id, operation)?;
+                }
+            }
         }
-        match request {
-            Request::SaveLayout(layout) => {
-                state.layout = Some(layout);
-                reply(&mut stream, Ok(()))?;
-            }
-            Request::Spawn {
-                command,
-                environment,
-            } => {
-                let result = match state.terminals.entry(command.id) {
-                    std::collections::btree_map::Entry::Occupied(_) => {
-                        Err(io::Error::other("terminal id already exists"))
-                    }
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        let changes = Arc::clone(changes);
-                        command
-                            .start_with_environment(
-                                Arc::new(move || changes.notify()),
-                                Some(environment),
-                            )
-                            .map(|session| {
-                                session.serve_images_on_demand();
-                                let info = session.info();
-                                entry.insert(session);
-                                info
-                            })
-                    }
-                };
-                changes.notify();
-                reply(&mut stream, result)?;
-            }
-            Request::Terminal(id, operation) => {
-                serve_terminal(&mut state, &mut stream, id, operation)?
-            }
+        if tray_dirty {
+            tray.update(snapshot_tray_state(state, windows));
         }
     }
     Ok(())
 }
 
-fn maintain(state: &Mutex<State>, changes: &Changes, running: &AtomicBool) {
+fn maintain(
+    state: &Mutex<State>,
+    changes: &Changes,
+    running: &AtomicBool,
+    windows: &AtomicUsize,
+    tray: &platform::TrayHandle,
+) {
     let mut revision = 0;
     let mut interval = WATCH_TIMEOUT;
     let mut last_scan = Instant::now() - FRAME_INTERVAL;
@@ -744,6 +905,7 @@ fn maintain(state: &Mutex<State>, changes: &Changes, running: &AtomicBool) {
                 interval = interval.min(deadline.saturating_duration_since(now));
             }
         }
+        tray.update(snapshot_tray_state(state, windows));
         if flushed {
             changes.notify();
         }
@@ -766,20 +928,63 @@ fn accept_role(stream: &mut Stream) -> io::Result<Role> {
 
 /// Keeps PTYs and the last terminal layout alive until explicitly stopped.
 pub fn serve(dir: &Path) -> io::Result<()> {
+    serve_with_options(dir, ServerOptions::default())
+}
+
+/// Keeps PTYs, the last terminal layout, and a system tray indicator alive until explicitly stopped.
+pub fn serve_with_options(dir: &Path, options: ServerOptions) -> io::Result<()> {
     platform::prepare_session_dir(dir)?;
-    let _server_lock = lock_file(dir, "server.lock")?;
+    let dir = dir.canonicalize()?;
+    let _server_lock = lock_file(&dir, "server.lock")?;
     let listener = platform::listen_session_socket(&dir.join("pty.sock"))?;
     let state = Arc::new(Mutex::new(State::default()));
     let changes = Arc::new(Changes::default());
     let running = Arc::new(AtomicBool::new(true));
-    let (worker_state, worker_changes, worker_running) = (
+    let windows = Arc::new(AtomicUsize::new(0));
+    let event_clients = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(ServerEvents::default());
+
+    let app_executable = options
+        .app_executable
+        .or_else(|| std::env::current_exe().ok());
+    let open_windows = Arc::clone(&windows);
+    let open_events = Arc::clone(&events);
+    let quit_dir = dir.clone();
+    let tray = Arc::new(platform::TrayHandle::start(
+        options.tray_icon,
+        snapshot_tray_state(&state, &windows),
+        platform::TrayCallbacks {
+            on_open: Arc::new(move || {
+                if open_windows.load(Ordering::Acquire) > 0 {
+                    open_events.emit(ServerEvent::FocusWindow);
+                } else if let Some(exe) = app_executable.as_deref() {
+                    let _ = platform::spawn_detached_app(exe);
+                }
+            }),
+            on_quit: Arc::new(move || {
+                let _ = Client::stop(&quit_dir);
+            }),
+        },
+    ));
+
+    let (worker_state, worker_changes, worker_running, worker_windows, worker_tray) = (
         Arc::clone(&state),
         Arc::clone(&changes),
         Arc::clone(&running),
+        Arc::clone(&windows),
+        Arc::clone(&tray),
     );
     let worker = thread::Builder::new()
         .name("icy-session-maintenance".into())
-        .spawn(move || maintain(&worker_state, &worker_changes, &worker_running))?;
+        .spawn(move || {
+            maintain(
+                &worker_state,
+                &worker_changes,
+                &worker_running,
+                &worker_windows,
+                &worker_tray,
+            )
+        })?;
     let result = loop {
         let mut stream = match listener.accept() {
             Ok(stream) => stream,
@@ -791,6 +996,12 @@ pub fn serve(dir: &Path) -> io::Result<()> {
         };
         match role {
             Role::Stop => {
+                events.emit(ServerEvent::QuitWindow);
+                events.close();
+                let flush_deadline = Instant::now() + Duration::from_millis(200);
+                while event_clients.load(Ordering::Acquire) > 0 && Instant::now() < flush_deadline {
+                    thread::sleep(Duration::from_millis(5));
+                }
                 running.store(false, Ordering::Release);
                 state.lock().unwrap().terminals.clear();
                 break reply(&mut stream, Ok(()));
@@ -811,18 +1022,53 @@ pub fn serve(dir: &Path) -> io::Result<()> {
                     }
                 });
             }
+            Role::Events => {
+                let mut seen = events.current_seq();
+                if reply(&mut stream, Ok(())).is_err() {
+                    continue;
+                }
+                let events = Arc::clone(&events);
+                let running = Arc::clone(&running);
+                let event_clients = Arc::clone(&event_clients);
+                event_clients.fetch_add(1, Ordering::AcqRel);
+                thread::spawn(move || {
+                    struct EventClientGuard(Arc<AtomicUsize>);
+                    impl Drop for EventClientGuard {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::AcqRel);
+                        }
+                    }
+                    let _guard = EventClientGuard(event_clients);
+                    loop {
+                        if let Some((next, event)) = events.wait(seen, WATCH_TIMEOUT) {
+                            seen = next;
+                            if write_frame(&mut stream, &event).is_err()
+                                || event == ServerEvent::QuitWindow
+                            {
+                                break;
+                            }
+                        } else if !running.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                });
+            }
             Role::Control => {
                 let state = Arc::clone(&state);
                 let changes = Arc::clone(&changes);
                 let running = Arc::clone(&running);
+                let windows = Arc::clone(&windows);
+                let tray = Arc::clone(&tray);
                 thread::spawn(move || {
-                    let _ = serve_controller(stream, &state, &changes, &running);
+                    let _ = serve_controller(stream, &state, &changes, &running, &windows, &tray);
                 });
             }
         }
     };
     running.store(false, Ordering::Release);
+    events.close();
     changes.notify();
     let _ = worker.join();
+    drop(tray);
     result
 }

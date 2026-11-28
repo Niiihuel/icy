@@ -35,6 +35,162 @@ fn workspaces_button_draws_the_grid_glyph() {
 }
 
 #[test]
+fn translucent_chrome_aligns_the_header_and_blurs_one_layer_per_overlay() {
+    use jsnir::editor::PointSelection;
+
+    const SEARCH: [u8; 4] = [1, 2, 3, 255];
+    const COLLAPSE: [u8; 4] = [4, 5, 6, 255];
+    const TAB: [u8; 4] = [7, 8, 9, 255];
+    const TAB_FILL: [u8; 4] = [10, 11, 12, 255];
+    let mut host =
+        Host::with_request_handler(APP.into(), "{}".into(), TextEngine::default(), |_| {
+            Ok("ok".into())
+        })
+        .unwrap();
+    host.set_reduced_motion(true);
+    install_fonts(&mut host);
+    for (name, rgba) in [
+        ("glyph:search", SEARCH),
+        ("glyph:panel-left", COLLAPSE),
+        ("cli:codex", TAB),
+        ("glyph:workspace-tab-fill", TAB_FILL),
+    ] {
+        host.set_image(name.into(), rgba.to_vec(), [1, 1]);
+    }
+    let cfg = IcyConfig {
+        window_transparency: 45,
+        ..IcyConfig::default()
+    };
+    host.push(json!({"view": "config", "data": cfg}).to_string());
+    host.push(json!({"view": "windowTransparencySupport", "data": true}).to_string());
+    host.push(json!({"view": "viewport", "data": [640, 800]}).to_string());
+    host.push(
+        json!({"view": "tiling", "data": Workspaces::new(1, TilingMode::Niri).snapshot()})
+            .to_string(),
+    );
+    host.push(json!({"view": "sessions", "data": {
+        "activeId": 1, "archivedCount": 0, "items": [
+            { "id": 1, "cli": "codex", "title": "Working session", "cwd": "/project", "alive": true },
+        ],
+    }}).to_string());
+
+    let header_icon = |frame: &Frame, marker: [u8; 4]| -> [f32; 2] {
+        frame
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Image { image, rect, .. }
+                    if image.rgba.as_ref() == marker && rect[1] < 50. =>
+                {
+                    Some([rect[0] + rect[2] / 2., rect[1] + rect[3] / 2.])
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let chrome = frame(&mut host);
+    let text_point = |frame: &Frame, label: &str| {
+        frame
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text { text, rect, .. } if text == label => {
+                    Some([rect[0] + 4., rect[1] + rect[3] / 2.])
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {label}"))
+    };
+    let has_fill = |frame: &Frame, [x, y]: [f32; 2], color: [u8; 4]| {
+        frame.items.iter().any(|item| matches!(item,
+            Item::Fill { top, rect: [left, top_edge, width, height], .. }
+                if *top == color && x > *left && x < left + width && y > *top_edge && y < top_edge + height
+        ))
+    };
+    let search = header_icon(&chrome, SEARCH);
+    let collapse = header_icon(&chrome, COLLAPSE);
+    let tab = header_icon(&chrome, TAB);
+    assert!((search[1] - tab[1]).abs() <= 0.5, "{search:?} {tab:?}");
+    assert!((collapse[1] - tab[1]).abs() <= 0.5, "{collapse:?} {tab:?}");
+    assert!(!chrome.items.iter().any(|item| matches!(
+        item, Item::Image { image, .. } if image.rgba.as_ref() == TAB_FILL
+    )));
+    let selection = [250, 250, 250, 31];
+    assert!(has_fill(&chrome, search, [10, 10, 10, 148]));
+    assert!(has_fill(&chrome, tab, selection));
+    assert!(has_fill(
+        &chrome,
+        text_point(&chrome, "project · Working session"),
+        selection,
+    ));
+    assert!(
+        !chrome
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Backdrop { .. }))
+    );
+
+    let account = text_point(&chrome, "Local user");
+    let click = |host: &mut Host, point| {
+        host.pointer_move(Some(point));
+        host.pointer_down(PointSelection::Place);
+        host.pointer_up();
+        frame(host)
+    };
+    let backdrop_rects = |frame: &Frame| {
+        frame
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Backdrop { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let menu = click(&mut host, account);
+    let menu_blur = backdrop_rects(&menu);
+    assert_eq!(menu_blur.len(), 1, "{menu_blur:?}");
+    assert!(menu_blur[0][2] < 640.);
+    host.escape();
+    frame(&mut host);
+    let palette = click(&mut host, search);
+    assert_eq!(backdrop_rects(&palette), [[0., 0., 640., 800.]]);
+    host.push(json!({"view": "modalKey", "data": "escape"}).to_string());
+    frame(&mut host);
+
+    let menu = click(&mut host, account);
+    let modal = click(&mut host, text_point(&menu, "Release notes"));
+    assert_eq!(backdrop_rects(&modal), [[0., 0., 640., 800.]]);
+    assert!(has_fill(
+        &modal,
+        text_point(&modal, "Release notes"),
+        [23, 23, 23, 143],
+    ));
+    host.escape();
+    frame(&mut host);
+
+    let menu = click(&mut host, account);
+    let settings = click(&mut host, text_point(&menu, "Settings"));
+    assert!(backdrop_rects(&settings).is_empty());
+    assert!(has_fill(
+        &settings,
+        text_point(&settings, "Background transparency"),
+        [15, 15, 16, 143],
+    ));
+
+    let mut update = updater::UpdateState::initial();
+    update.stage = "ready".into();
+    host.push(json!({"view": "update", "data": update}).to_string());
+    let restart = frame(&mut host);
+    assert_eq!(backdrop_rects(&restart), [[0., 0., 640., 800.]]);
+    assert!(has_fill(
+        &restart,
+        text_point(&restart, "Restart icy to install update?"),
+        [23, 23, 23, 143],
+    ));
+}
+
+#[test]
 fn right_edge_resizes_the_tab_without_moving_its_pane() {
     use jsnir::{editor::PointSelection, host::Cursor};
 
@@ -666,7 +822,11 @@ fn overflow_fade_tracks_the_available_width_without_moving_titles() {
     let script = format!(
         r#"{APP}
         const titleWidth = signal(90);
-        onHost(message => {{ titleWidth.value = message.width; }});
+        onHost(message => {{
+            titleWidth.value = message.width;
+            windowTransparencySupported.value = !!message.glass;
+            configState.value = {{ ...configState.value, windowTransparency: 45 }};
+        }});
         mount(() => Column({{ children: [
             Box({{ style: () => ({{ width: titleWidth.value }}), children: FadeText({{
                 text: 'A long session title that needs more room', font: {{size: 13}},
@@ -718,7 +878,32 @@ fn overflow_fade_tracks_the_available_width_without_moving_titles() {
     assert_eq!(title_rect(&narrow)[0], title_rect(&frame(&mut host))[0]);
     assert!(!narrow.animating);
 
-    host.push(json!({"width": 440}).to_string());
+    host.push(json!({"width": 90, "glass": true}).to_string());
+    let glass = frame(&mut host);
+    let glyphs: Vec<_> = glass
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Text {
+                text,
+                style,
+                rect,
+                clip,
+                ..
+            } if text.starts_with("A long session title") => {
+                Some((style.color[3], rect[0], clip[0], clip[2]))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(fade_rects(&glass).is_empty());
+    assert_eq!(glyphs.len(), 5, "{glyphs:?}");
+    assert!(glyphs.iter().all(|glyph| glyph.1 == title_rect(&narrow)[0]));
+    assert_eq!(glyphs[0].2 + glyphs[0].3, 74.);
+    assert_eq!(glyphs[4].2 + glyphs[4].3, 90.);
+    assert!(glyphs.windows(2).all(|pair| pair[0].0 > pair[1].0));
+
+    host.push(json!({"width": 440, "glass": true}).to_string());
     frame(&mut host);
     std::thread::sleep(Duration::from_millis(40));
     assert!(fade_rects(&frame(&mut host)).is_empty());

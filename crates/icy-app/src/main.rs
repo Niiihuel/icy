@@ -34,12 +34,14 @@ use icy_core::platform;
 #[cfg(test)]
 use icy_core::session::Session;
 use icy_core::session::SessionInfo;
-use icy_core::session_server::{self, Client as SessionClient, Spawn as TerminalSpawn, Terminal};
+use icy_core::session_server::{
+    self, Client as SessionClient, ServerEvent, ServerOptions, Spawn as TerminalSpawn, Terminal,
+};
 use icy_core::syntax::{self, HighlightRange};
 use icy_core::tiling::{
     ColumnView, DropTarget, FocusDir, RESIZE_STEP, TilingMode, TilingView, Workspaces,
 };
-use icy_core::updater::{self, UpdateState};
+use icy_core::updater::{self, CheckSchedule, CheckStatus, UpdateState};
 use icy_core::vt::{DEFAULT_BG, Row as VtRow, Screen};
 use jsnir::host::Host;
 use jsnir::text::TextEngine;
@@ -635,7 +637,9 @@ enum BridgeEvent {
     ThemesDirty,
     EditorsUpdated(Vec<platform::ExternalEditor>),
     GitHubUpdated(GitHubStatus),
-    UpdateChanged(UpdateState),
+    CheckUpdate,
+    UpdateChecked(Result<Option<updater::CheckedRelease>, updater::CheckError>),
+    UpdateChanged,
     PushFiles(FilesPayload),
     PushChanges(PathBuf, ChangeSet),
     PushViewer(ViewerPayload),
@@ -665,6 +669,8 @@ enum BridgeEvent {
     EditorCommand(String),
     CapturedKey(String),
     KeybindsDirty(Vec<&'static str>),
+    FocusWindow,
+    ServerQuit,
     QuitApp,
 }
 
@@ -694,6 +700,8 @@ struct SessionManager {
     terminal_sizes: BTreeMap<u64, (u16, u16)>,
     cwd: PathBuf,
     on_pty_update: Arc<dyn Fn() + Send + Sync>,
+    restarting_for_update: bool,
+    server_stopped: bool,
 }
 
 impl SessionManager {
@@ -727,14 +735,22 @@ impl SessionManager {
             terminal_sizes: BTreeMap::new(),
             cwd,
             on_pty_update,
+            restarting_for_update: false,
+            server_stopped: false,
         }
+    }
+
+    fn detach_sessions(&mut self) {
+        self.sessions.clear();
+        self.session_client = None;
     }
 
     fn attach_sessions(&mut self, tx: &mpsc::Sender<BridgeEvent>) -> std::io::Result<()> {
         let dir = session_server::default_directory();
         let dirty = tx.clone();
         let notices = tx.clone();
-        let (client, attachment) = SessionClient::attach(
+        let events = tx.clone();
+        let (client, attachment) = SessionClient::attach_with_events(
             &dir,
             &std::env::current_exe()?,
             move || {
@@ -746,6 +762,14 @@ impl SessionManager {
                     text: "Disconnected from the session server. Reopen icy to reconnect.".into(),
                 });
                 let _ = notices.send(BridgeEvent::PtyDirty);
+            },
+            move |event| match event {
+                ServerEvent::FocusWindow => {
+                    let _ = events.send(BridgeEvent::FocusWindow);
+                }
+                ServerEvent::QuitWindow => {
+                    let _ = events.send(BridgeEvent::ServerQuit);
+                }
             },
         )?;
         let terminal_ids: BTreeSet<_> = attachment.terminals.iter().map(|info| info.id).collect();
@@ -2371,61 +2395,65 @@ fn spawn_github_probe(cwd: PathBuf, tx: mpsc::Sender<BridgeEvent>) {
         });
 }
 
-fn spawn_update_check(tx: mpsc::Sender<BridgeEvent>) {
-    let _ = std::thread::Builder::new()
+fn spawn_update_check(etag: Option<String>, tx: mpsc::Sender<BridgeEvent>) -> std::io::Result<()> {
+    std::thread::Builder::new()
         .name("icy-update-check".into())
         .spawn(move || {
-            let state = updater::check_latest_release();
-            let _ = tx.send(BridgeEvent::UpdateChanged(state));
-        });
+            let result = updater::check_latest_release(etag.as_deref());
+            let _ = tx.send(BridgeEvent::UpdateChecked(result));
+        })?;
+    Ok(())
 }
 
-fn spawn_update_download(manager: Arc<Mutex<SessionManager>>, tx: mpsc::Sender<BridgeEvent>) {
-    let snapshot = {
+fn spawn_update_download(manager: &Arc<Mutex<SessionManager>>, tx: &mpsc::Sender<BridgeEvent>) {
+    let asset = {
         let mut guard = manager.lock().unwrap();
-        if matches!(guard.update.stage.as_str(), "downloading" | "verifying") {
+        if !guard.update.has_update || !guard.update.can_check() {
             return;
         }
+        let Some(asset) = guard.update.asset.clone() else {
+            return;
+        };
         guard.update.stage = "downloading".into();
         guard.update.progress = 8;
         guard.update.status_text = "Starting download...".into();
-        guard.update.clone()
+        asset
     };
-    let _ = tx.send(BridgeEvent::UpdateChanged(snapshot.clone()));
+    let _ = tx.send(BridgeEvent::UpdateChanged);
 
-    let _ = std::thread::Builder::new()
+    let worker_manager = Arc::clone(manager);
+    let worker_tx = tx.clone();
+    let worker = std::thread::Builder::new()
         .name("icy-update-download".into())
         .spawn(move || {
-            let mut working = snapshot.clone();
-            let asset = snapshot.asset_url.clone();
-            let version = snapshot.available_version.clone();
-            let result = updater::download_and_stage(asset.as_deref(), &version, |st, pct, msg| {
-                working.stage = st.into();
-                working.progress = pct;
-                working.status_text = msg.into();
-                if let Ok(mut guard) = manager.lock() {
-                    guard.update = working.clone();
-                }
-                let _ = tx.send(BridgeEvent::UpdateChanged(working.clone()));
+            let result = updater::download_and_stage(&asset, |stage, progress, status| {
+                let mut guard = worker_manager.lock().unwrap();
+                guard.update.stage = stage.into();
+                guard.update.progress = progress;
+                guard.update.status_text = status.into();
+                let _ = worker_tx.send(BridgeEvent::UpdateChanged);
             });
-
+            let mut guard = worker_manager.lock().unwrap();
             match result {
                 Ok(path) => {
-                    working.stage = "ready".into();
-                    working.progress = 100;
-                    working.status_text = "Ready to install & restart".into();
-                    working.staged_path = Some(path.display().to_string());
+                    guard.update.stage = "ready".into();
+                    guard.update.progress = 100;
+                    guard.update.status_text = "Ready to install & restart".into();
+                    guard.update.staged_path = Some(path);
                 }
-                Err(err) => {
-                    working.stage = "error".into();
-                    working.status_text = err;
+                Err(error) => {
+                    guard.update.stage = "error".into();
+                    guard.update.status_text = error;
                 }
             }
-            if let Ok(mut guard) = manager.lock() {
-                guard.update = working.clone();
-            }
-            let _ = tx.send(BridgeEvent::UpdateChanged(working));
+            let _ = worker_tx.send(BridgeEvent::UpdateChanged);
         });
+    if let Err(error) = worker {
+        let mut guard = manager.lock().unwrap();
+        guard.update.stage = "error".into();
+        guard.update.status_text = format!("Cannot start the download: {error}");
+        let _ = tx.send(BridgeEvent::UpdateChanged);
+    }
 }
 
 fn handle_request(
@@ -2921,6 +2949,12 @@ fn handle_request(
             let mut guard = manager.lock().unwrap();
             if let Some(value) = payload.get("windowTransparency").and_then(Value::as_i64) {
                 guard.config.window_transparency = config::window_transparency_percent(value);
+            }
+            if let Some(keep) = payload
+                .get("keepRunningInBackground")
+                .and_then(Value::as_bool)
+            {
+                guard.config.keep_running_in_background = keep;
             }
             if let Some(theme) = payload.get("theme").and_then(Value::as_str) {
                 guard.config.theme = theme.into();
@@ -3456,22 +3490,25 @@ fn handle_request(
             Ok("ok".into())
         }
         "checkUpdate" => {
-            spawn_update_check(tx.clone());
+            let _ = tx.send(BridgeEvent::CheckUpdate);
             Ok("ok".into())
         }
         "downloadUpdate" => {
-            spawn_update_download(Arc::clone(manager), tx.clone());
+            spawn_update_download(manager, tx);
             Ok("ok".into())
         }
         "confirmRestartUpdate" => {
-            let staged = {
-                let guard = manager.lock().unwrap();
-                guard.update.staged_path.clone()
-            };
-            let Some(staged_str) = staged else {
-                return Err("no staged update ready".into());
-            };
-            updater::apply_staged_and_restart(Path::new(&staged_str))?;
+            let mut guard = manager.lock().unwrap();
+            if guard.restarting_for_update {
+                return Ok("ok".into());
+            }
+            let staged = guard
+                .update
+                .staged_path
+                .as_deref()
+                .ok_or("no staged update ready")?;
+            updater::apply_staged_and_restart(staged)?;
+            guard.restarting_for_update = true;
             let _ = tx.send(BridgeEvent::QuitApp);
             Ok("ok".into())
         }
@@ -3482,6 +3519,7 @@ fn handle_request(
 fn run_bridge(
     pusher: Pusher,
     rx: mpsc::Receiver<BridgeEvent>,
+    tx: mpsc::Sender<BridgeEvent>,
     manager: Arc<Mutex<SessionManager>>,
     usage_scan: Arc<UsageScan>,
 ) {
@@ -3507,13 +3545,21 @@ fn run_bridge(
     // A program can begin a synchronized redraw without sending the closing marker (for
     // instance if it is interrupted). vte's deadline must be driven even when no bytes arrive.
     let mut sync_deadline: Option<Instant> = None;
+    let auto_check = manager.lock().unwrap().config.check_updates;
+    let mut update_schedule = CheckSchedule::new(auto_check, Instant::now());
+    let mut update_can_check = true;
+    let mut update_etag = None;
 
     loop {
         let status_deadline = status_dirty.then_some(next_status_refresh);
+        let update_deadline = update_can_check
+            .then(|| update_schedule.deadline())
+            .flatten();
         let deadline = sync_deadline
             .into_iter()
             .chain(status_deadline)
             .chain(agent_notifications.deadline())
+            .chain(update_deadline)
             .min();
         let event = if let Some(deadline) = deadline {
             rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -3546,6 +3592,8 @@ fn run_bridge(
         let mut need_editors = false;
         let mut need_github = false;
         let mut need_update = false;
+        let mut manual_update_check = false;
+        let mut checked_update = None;
         let mut pending_files: Vec<FilesPayload> = Vec::new();
         let mut pending_changes = BTreeMap::new();
         let mut pending_viewer = Vec::new();
@@ -3604,10 +3652,9 @@ fn run_bridge(
                 manager.lock().unwrap().github = gh;
                 need_github = true;
             }
-            BridgeEvent::UpdateChanged(up) => {
-                manager.lock().unwrap().update = up;
-                need_update = true;
-            }
+            BridgeEvent::CheckUpdate => manual_update_check = true,
+            BridgeEvent::UpdateChecked(result) => checked_update = Some(result),
+            BridgeEvent::UpdateChanged => need_update = true,
             BridgeEvent::PushFiles(f) => pending_files.push(f),
             BridgeEvent::PushChanges(root, changes) => {
                 pending_changes.insert(root, changes);
@@ -3640,6 +3687,13 @@ fn run_bridge(
                 avatar_path = Some(path);
                 need_avatar = true;
             }
+            BridgeEvent::FocusWindow => {
+                let _ = pusher.focus();
+            }
+            BridgeEvent::ServerQuit => {
+                manager.lock().unwrap().server_stopped = true;
+                quit_app = true;
+            }
             BridgeEvent::QuitApp => quit_app = true,
         };
 
@@ -3668,6 +3722,55 @@ fn run_bridge(
         if quit_app {
             let _ = pusher.quit();
             break;
+        }
+
+        if need_config
+            || need_update
+            || manual_update_check
+            || checked_update.is_some()
+            || update_deadline.is_some_and(|deadline| deadline <= now)
+        {
+            let mut guard = manager.lock().unwrap();
+            if need_config {
+                update_schedule.set_enabled(guard.config.check_updates, now);
+            }
+            if let Some(result) = checked_update {
+                update_schedule.complete(now, result.as_ref().err());
+                match result {
+                    Ok(Some(checked)) => {
+                        update_etag = checked.etag;
+                        // An unchanged release leaves the state of a retryable download intact.
+                        if guard.update.stage != "error"
+                            || guard.update.available_version != checked.release.available_version
+                            || guard.update.asset != checked.release.asset
+                        {
+                            guard.update = checked.release;
+                        }
+                        guard.update.check_status = CheckStatus::Succeeded;
+                    }
+                    Ok(None) => guard.update.check_status = CheckStatus::Succeeded,
+                    Err(_) => guard.update.check_status = CheckStatus::Failed,
+                }
+                manual_update_check = false;
+                need_update = true;
+            }
+            let due = update_schedule
+                .deadline()
+                .is_some_and(|deadline| deadline <= now);
+            if (manual_update_check || due)
+                && guard.update.can_check()
+                && update_schedule.can_check(now)
+            {
+                guard.update.check_status =
+                    if spawn_update_check(update_etag.clone(), tx.clone()).is_ok() {
+                        CheckStatus::Checking
+                    } else {
+                        update_schedule.complete(now, Some(&updater::CheckError::default()));
+                        CheckStatus::Failed
+                    };
+                need_update = true;
+            }
+            update_can_check = guard.update.can_check();
         }
 
         for (id, cwd, cli, text) in pending_contexts {
@@ -4042,7 +4145,22 @@ fn run_offscreen(
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let terminal_server = match args.as_slice() {
-        [flag, path] if flag == "--session-server" => Some(session_server::serve(Path::new(path))),
+        [flag, path] if flag == "--session-server" => Some(session_server::serve_with_options(
+            Path::new(path),
+            ServerOptions {
+                app_executable: None,
+                tray_icon: icons::tray_icon(),
+            },
+        )),
+        [flag, path, app_flag, app_exe] if flag == "--session-server" && app_flag == "--app" => {
+            Some(session_server::serve_with_options(
+                Path::new(path),
+                ServerOptions {
+                    app_executable: Some(PathBuf::from(app_exe)),
+                    tray_icon: icons::tray_icon(),
+                },
+            ))
+        }
         [flag] if flag == "--stop-session-server" => {
             Some(SessionClient::stop(&session_server::default_directory()))
         }
@@ -4122,12 +4240,9 @@ fn main() -> ExitCode {
         );
     }
 
-    // Kick off non-blocking background IDE detection, GitHub SSH & release checks.
+    // Kick off non-blocking background IDE and GitHub SSH detection.
     spawn_editors_probe(tx.clone());
     spawn_github_probe(cwd.clone(), tx.clone());
-    if manager.lock().unwrap().config.check_updates {
-        spawn_update_check(tx.clone());
-    }
 
     let key_manager = Arc::clone(&manager);
     let paste_manager = Arc::clone(&manager);
@@ -4276,10 +4391,23 @@ fn main() -> ExitCode {
         });
         std::thread::Builder::new()
             .name("icy-ui-bridge".into())
-            .spawn(move || run_bridge(pusher, rx, bridge_manager, usage_scan))
+            .spawn(move || run_bridge(pusher, rx, tx, bridge_manager, usage_scan))
             .expect("spawn ui bridge thread");
     });
-    manager.lock().unwrap().save_terminal_layout();
+    let (keep_background, restart_for_update, server_stopped, has_active_sessions) = {
+        let guard = manager.lock().unwrap();
+        guard.save_terminal_layout();
+        (
+            guard.config.keep_running_in_background,
+            guard.restarting_for_update,
+            guard.server_stopped,
+            guard.sessions.iter().any(Terminal::is_alive),
+        )
+    };
+    if !server_stopped && (!keep_background || (restart_for_update && !has_active_sessions)) {
+        manager.lock().unwrap().detach_sessions();
+        let _ = SessionClient::stop(&session_server::default_directory());
+    }
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -4293,6 +4421,14 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_update_asset() -> updater::ReleaseAsset {
+        updater::ReleaseAsset {
+            url: "https://example.com/icy-linux-x86_64".into(),
+            size: 123,
+            sha256: "ab".repeat(32),
+        }
+    }
 
     #[test]
     fn embedded_tsx_app_mounts_and_renders_frame() {
@@ -4376,6 +4512,163 @@ mod tests {
         assert_eq!(backdrop(&frame(&mut host)), 89);
         host.push(json!({"view": "windowTransparencySupport", "data": false}).to_string());
         assert_eq!(backdrop(&frame(&mut host)), 255);
+    }
+
+    #[test]
+    fn settings_controls_background_mode_and_reports_update_check_status() {
+        use jsnir::editor::PointSelection;
+        use jsnir::host::{Frame, Item};
+        use serde_json::json;
+
+        fn frame(host: &mut Host) -> Frame {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                host.poll();
+                let frame = host.frame(1280., 800., 1., 4096);
+                if (!host.busy() && !frame.animating) || Instant::now() >= deadline {
+                    return frame;
+                }
+                std::thread::sleep(Duration::from_millis(4));
+            }
+        }
+
+        let (requests, received) = mpsc::channel();
+        let script = format!("{APP}\nactiveNav.value = 'settings';");
+        let mut host =
+            Host::with_request_handler(script, "{}".into(), TextEngine::default(), move |raw| {
+                let request: Value = serde_json::from_str(&raw).unwrap();
+                if matches!(
+                    request["type"].as_str(),
+                    Some("updateConfig" | "checkUpdate" | "downloadUpdate")
+                ) {
+                    requests.send(request).unwrap();
+                }
+                Ok("ok".into())
+            })
+            .unwrap();
+        install_fonts(&mut host);
+
+        let initial = frame(&mut host);
+        let row = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text { rect, text, .. } if text == "Keep running in background" => {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .expect("background mode setting");
+        let toggle = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Fill { rect, .. }
+                    if (rect[2] - 34.).abs() < 1.
+                        && (rect[3] - 18.).abs() < 1.
+                        && (rect[1] - row[1]).abs() < 24. =>
+                {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .expect("background mode toggle");
+        host.pointer_move(Some([
+            toggle[0] + toggle[2] / 2.,
+            toggle[1] + toggle[3] / 2.,
+        ]));
+        host.pointer_down(PointSelection::Place);
+        host.pointer_up();
+        frame(&mut host);
+        let req = received.try_recv().expect("updateConfig request");
+        assert_eq!(req["type"], "updateConfig");
+        assert_eq!(req["keepRunningInBackground"], false);
+
+        // A failed lookup leaves manual checks available and never reports "up to date".
+        let updates_nav = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text { rect, text, .. } if text == "Updates" => Some(*rect),
+                _ => None,
+            })
+            .expect("Updates nav item");
+        host.pointer_move(Some([
+            updates_nav[0] + updates_nav[2] / 2.,
+            updates_nav[1] + updates_nav[3] / 2.,
+        ]));
+        host.pointer_down(PointSelection::Place);
+        host.pointer_up();
+        let failed = UpdateState {
+            check_status: CheckStatus::Failed,
+            ..UpdateState::initial()
+        };
+        host.push(json!({"view": "update", "data": failed}).to_string());
+        let updates = frame(&mut host);
+        assert!(updates.items.iter().any(|item| matches!(item,
+            Item::Text { text, .. } if text == "Could not check for updates. Try again later."
+        )));
+        assert!(!updates.items.iter().any(|item| matches!(item,
+            Item::Text { text, .. } if text.starts_with("Up to date") || text == "Download"
+        )));
+        let check_now = updates
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text { rect, text, .. } if text == "Check now" => Some(*rect),
+                _ => None,
+            })
+            .expect("manual check button");
+        host.pointer_move(Some([
+            check_now[0] + check_now[2] / 2.,
+            check_now[1] + check_now[3] / 2.,
+        ]));
+        host.pointer_down(PointSelection::Place);
+        host.pointer_up();
+        frame(&mut host);
+        let request = received.try_recv().expect("checkUpdate request");
+        assert_eq!(request["type"], "checkUpdate");
+
+        let checking = UpdateState {
+            check_status: CheckStatus::Checking,
+            ..failed
+        };
+        host.push(json!({"view": "update", "data": checking}).to_string());
+        let updates = frame(&mut host);
+        assert!(updates.items.iter().any(|item| matches!(item,
+            Item::Text { text, .. } if text == "Checking for updates…"
+        )));
+        host.pointer_down(PointSelection::Place);
+        host.pointer_up();
+        frame(&mut host);
+        assert!(received.try_recv().is_err());
+
+        let update = UpdateState {
+            has_update: true,
+            available_version: "0.2.0".into(),
+            asset: Some(sample_update_asset()),
+            check_status: CheckStatus::Succeeded,
+            ..UpdateState::initial()
+        };
+        host.push(json!({"view": "update", "data": update}).to_string());
+        let available = frame(&mut host);
+        let download_btn = available
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Text { rect, text, .. } if text == "Download" => Some(*rect),
+                _ => None,
+            })
+            .expect("Download button when update available");
+        host.pointer_move(Some([
+            download_btn[0] + download_btn[2] / 2.,
+            download_btn[1] + download_btn[3] / 2.,
+        ]));
+        host.pointer_down(PointSelection::Place);
+        host.pointer_up();
+        frame(&mut host);
+        let req = received.try_recv().expect("downloadUpdate request");
+        assert_eq!(req["type"], "downloadUpdate");
     }
 
     #[test]
@@ -4715,6 +5008,7 @@ mod tests {
         let update = updater::UpdateState {
             has_update: true,
             available_version: "2.0.0".into(),
+            asset: Some(sample_update_asset()),
             ..updater::UpdateState::initial()
         };
         host.push(json!({ "view": "update", "data": update }).to_string());

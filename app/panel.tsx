@@ -492,7 +492,7 @@ function ReviewTabs(props: { cwd: string }): Element {
       {/* The active tab's outline replaces that span of the divider, as in the workspace tab bar. */}
       <Box style={() => ({ position: "absolute", left: activeIndex() * stride, top: spacing.headerHeight - layout.height,
         width: outlineWidth, height: layout.height })}
-        paint={{ transitions: [springTransition("left")] }}>
+        paint={() => ({ opacity: windowTransparency() > 0 ? 0 : 1, transitions: [springTransition("left")] })}>
         <Box style={{ position: "absolute", left: 0, top: layout.height - layout.stroke, width: outlineWidth, height: layout.stroke }}
           paint={() => ({ background: palette().appBg })} />
         <Image source="glyph:workspace-tab-outline" style={{ width: outlineWidth, height: layout.height }}
@@ -509,7 +509,9 @@ function ReviewTabs(props: { cwd: string }): Element {
               onHover={(inside) => { hovered.value = inside; }}
               onPress={() => { reviewMode.value = tab.id; }}>
               <Box style={{ position: "absolute", left: spacing.unit / 2, top: spacing.unit, width: layout.width - spacing.unit, height: spacing.button }}
-                paint={() => ({ radius: radii.md, background: hovered.value && !active() ? palette().sidebarActive : 0,
+                paint={() => ({ radius: radii.md, background: active()
+                  ? windowTransparency() > 0 ? chromeHighlight(true) : 0
+                  : hovered.value ? chromeHighlight() : 0,
                   transitions: [smoothTransition("background", motion.fast)] })} />
               <Glyph name={tab.icon} size={layout.icon}
                 color={() => active() || hovered.value ? palette().textSecondary : palette().textMuted} />

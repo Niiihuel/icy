@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use icy_core::platform;
-use icy_core::session_server::{Client, Spawn, Terminal};
+use icy_core::session_server::{Client, ServerEvent, Spawn, Terminal};
 use icy_core::tiling::{TilingMode, Workspaces};
 
 struct StopServer(PathBuf);
@@ -143,6 +143,43 @@ fn terminal_server_keeps_working_without_a_window_and_reattaches() {
     assert!(reopened.layout.unwrap().all_panes().is_empty());
     assert!(client.load_archive().unwrap().is_empty());
     drop(client);
+}
+
+#[test]
+fn stopping_the_session_server_notifies_the_attached_window_cleanly() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("server-stop");
+    let _server = StopServer(dir.clone());
+    let app = Path::new(env!("CARGO_BIN_EXE_icy"));
+    let disconnected = Arc::new(AtomicBool::new(false));
+    let disconnected_flag = Arc::clone(&disconnected);
+    let (events_tx, events_rx) = mpsc::channel();
+    let (_client, _attachment) = Client::attach_with_events(
+        &dir,
+        app,
+        || {},
+        move || {
+            disconnected_flag.store(true, Ordering::Release);
+        },
+        move |event| {
+            let _ = events_tx.send(event);
+        },
+    )
+    .unwrap();
+
+    Client::stop(&dir).unwrap();
+    assert_eq!(
+        events_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+        ServerEvent::QuitWindow
+    );
+    std::thread::sleep(Duration::from_millis(80));
+    assert!(
+        !disconnected.load(Ordering::Acquire),
+        "clean server shutdown must not trigger a disconnect error"
+    );
 }
 
 // Executed as a child inside a PTY by the integration test.

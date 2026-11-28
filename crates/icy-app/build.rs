@@ -118,5 +118,9 @@ fn main() {
     let script = bundle
         .compile(&out)
         .unwrap_or_else(|error| panic!("{error}"));
+    let script = format!(
+        "const ICY_VERSION = {:?};\n{script}",
+        env!("CARGO_PKG_VERSION")
+    );
     fs::write(out.join("app.js"), script).unwrap();
 }

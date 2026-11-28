@@ -272,6 +272,7 @@ enum Message {
     DefaultFamily(String),
     Browser(browser::Command),
     EditorCommand(String),
+    Focus,
     Quit,
 }
 
@@ -347,6 +348,10 @@ impl Pusher {
 
     pub fn image(&self, source: String, rgba: Vec<u8>, size: [u32; 2]) -> bool {
         self.send(Message::Image { source, rgba, size })
+    }
+
+    pub fn focus(&self) -> bool {
+        self.send(Message::Focus)
     }
 
     pub fn quit(&self) -> bool {
@@ -1522,6 +1527,16 @@ impl ApplicationHandler for AppWindow {
                     self.browsers.apply(command);
                 }
                 Message::EditorCommand(command) => edits.push(command),
+                Message::Focus => {
+                    if let Some(surface) = &self.surface {
+                        surface.window.set_minimized(false);
+                        surface.window.set_visible(true);
+                        surface.window.focus_window();
+                        surface.window.request_user_attention(Some(
+                            winit::window::UserAttentionType::Informational,
+                        ));
+                    }
+                }
                 Message::Quit => {
                     events.exit();
                     return;

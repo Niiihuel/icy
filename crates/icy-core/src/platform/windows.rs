@@ -9,6 +9,12 @@ use super::{EditorLaunchStyle, ExternalEditor, build_editor_args};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+pub(super) fn background_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
 pub(super) fn default_shell() -> (String, Vec<String>) {
     if find_in_path("pwsh.exe").is_some() {
         return ("pwsh.exe".to_string(), vec!["-NoLogo".to_string()]);
@@ -306,6 +312,19 @@ pub(crate) fn session_server_command(executable: &Path, dir: &Path) -> io::Resul
     Ok(command)
 }
 
+pub(crate) fn spawn_detached_app(executable: &Path) -> io::Result<()> {
+    let mut command = Command::new(executable);
+    if let Some(dir) = executable.parent() {
+        command.current_dir(dir);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
 pub(super) fn open_external(target: &str) -> io::Result<()> {
     Command::new("cmd.exe")
         .args(["/C", "start", "", target])
@@ -569,7 +588,7 @@ pub(super) fn detect_editors() -> Vec<ExternalEditor> {
 }
 
 pub(super) fn release_asset_name() -> &'static str {
-    "icy-windows-x86_64"
+    "icy-windows-x86_64.exe"
 }
 
 pub(super) fn spawn_self_update_installer(staged_bin: &Path, current_exe: &Path) -> io::Result<()> {

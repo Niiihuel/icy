@@ -621,7 +621,7 @@ function ImagePreviewCard(props: { path: () => string }): Element {
       style={{ padding: [6, 6, 8, 6], gap: 6 }}
       paint={() => ({
         radius: radii.lg,
-        background: palette().appBg,
+        ...popupMaterial(palette().appBg),
         edge: palette().border,
         edgeWidth: spacing.hairline,
         shadows: [shadows.menu, shadows.menuTight],
@@ -704,7 +704,7 @@ function UrlPreviewCard(props: { url: () => string; onHover: (inside: boolean) =
       paint={() => ({
         radius: radii.lg,
         cursor: "pointer",
-        background: palette().appBg,
+        ...popupMaterial(palette().appBg),
         edge: palette().border,
         edgeWidth: spacing.hairline,
         shadows: [shadows.menu, shadows.menuTight],

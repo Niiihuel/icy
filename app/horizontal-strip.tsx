@@ -39,7 +39,7 @@ function StripEdge(props: {
               paint={() => ({
                 radius: radii.sm,
                 opacity: props.available() ? 1 : layout.endOpacity,
-                hover: { background: palette().sidebarActive },
+                hover: { background: chromeHighlight() },
                 active: { scale: controlState.iconPressScale },
                 starting: { opacity: 0, x: left ? spacing.unit : -spacing.unit },
                 transitions: [

@@ -13,9 +13,9 @@ Combina el enfoque de múltiples terminales para agentes CLI de [`herdr`](https:
 
 ### Continuar sesiones al reabrir icy
 
-Podés cerrar la ventana mientras un agente, una shell o un comando sigue trabajando. Cuando vuelvas a abrir icy, vas a encontrar las mismas terminales, con su historial y su distribución en workspaces. El botón de cerrar de cada terminal sí termina esa sesión.
+Podés cerrar la ventana mientras un agente, una shell o un comando sigue trabajando. Mientras el servidor de sesiones está activo, icy muestra un ícono en la bandeja del sistema (StatusNotifierItem en Linux y bandeja de notificaciones en Windows) con la cantidad de sesiones activas y un menú para **Open icy** o **Quit icy** (que detiene el servidor y cierra todas las terminales). Cuando vuelvas a abrir icy, vas a encontrar las mismas terminales, con su historial y su distribución en workspaces. El botón de cerrar de cada terminal sí termina esa sesión.
 
-El servidor de sesión es local y conserva las terminales mientras sigue en ejecución. `icy --stop-session-server` lo detiene y cierra sus terminales. Si reiniciás el equipo o se detiene el servidor, la recuperación de conversaciones depende de cada CLI.
+Si preferís que cerrar la ventana termine todo sin quedar en segundo plano, desactivá **Keep running in background** en **Settings → Appearance → Window**. También podés detener el servidor desde la terminal con `icy --stop-session-server`. Si reiniciás el equipo o se detiene el servidor, la recuperación de conversaciones depende de cada CLI.
 
 ### Pi
 
@@ -28,6 +28,12 @@ Las versiones de Pi con OSC 7501 informan cuándo empieza o termina una tarea y 
 En **Settings → CLIs & Agents → Desktop notifications** podés activar **Task completion** y **Approvals and questions** por separado. Con **Only for background sessions**, icy avisa por otros panes o cuando su ventana pierde el foco. Los avisos incluyen la CLI y la carpeta del proyecto y se entregan mientras icy está abierto, incluso minimizado. Usá **Send test** para comprobar la entrega.
 
 Los avisos se basan en el estado que reporta cada CLI. Las versiones que dependen de detección visual pueden variar con el idioma o la interfaz de la CLI. Linux usa el servicio de notificaciones del escritorio por D-Bus. En Windows, la primera entrega registra un acceso directo de icy en el menú Inicio para identificar el aviso.
+
+### Actualizaciones
+
+Por defecto, icy busca una versión estable en GitHub Releases al iniciar y cada cuatro horas mientras la aplicación está abierta. Si falla la consulta, reintenta con esperas crecientes y conserva el último resultado disponible. Cuando encuentra una versión nueva, aparece **Update** en el sidebar. La descarga y la instalación se inician desde la interfaz y el reinicio requiere confirmación.
+
+En **Settings → Updates** podés desactivar la detección automática y seguir usando **Check now**. icy verifica el tamaño y el SHA-256 del ejecutable publicado antes de ofrecer instalarlo. Si la release no incluye un ejecutable verificable para tu plataforma, podés abrirla en GitHub.
 
 ### Transparencia de la ventana
 

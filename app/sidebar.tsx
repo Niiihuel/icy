@@ -79,8 +79,8 @@ function SidebarNavRow(props: {
       onPress={props.onPress}
       paint={() => ({
         radius: radii.md,
-        background: isActive() ? palette().sidebarActive : 0,
-        hover: props.onPress ? { background: palette().sidebarActive } : undefined,
+        background: isActive() ? chromeHighlight(true) : 0,
+        hover: props.onPress ? { background: chromeHighlight(isActive()) } : undefined,
         transitions: [smoothTransition("background", motion.fast)],
       })}
     >
@@ -232,7 +232,7 @@ function CliUsageChip(props: { cli: () => SidebarCli }): Element {
             onPress={() => launchCli(props.cli().id)}
             paint={() => ({
               radius: radii.md,
-              hover: { background: palette().sidebarActive },
+              hover: { background: chromeHighlight() },
               active: { scale: controlState.iconPressScale },
               transitions: [
                 smoothTransition("background", motion.fast),
@@ -435,7 +435,7 @@ function SessionRow(props: { item: () => SessionItem; withinProject?: boolean })
       onContextMenu={() => { menu.value = true; }}
       paint={() => ({
         radius: radii.lg,
-        background: isActive() || hovered.value || menu.value ? palette().sidebarActive : 0,
+        background: isActive() || hovered.value || menu.value ? chromeHighlight(isActive() || menu.value) : 0,
         a11y: { label: `${label()}, ${status()}` },
         transitions: [smoothTransition("background", motion.fast)],
       })}>
@@ -508,7 +508,7 @@ function ProjectHeader(props: { group: () => ProjectGroup }): Element {
       }}
       paint={() => ({
         radius: radii.md,
-        background: hovered.value ? palette().sidebarActive : 0,
+        background: hovered.value ? chromeHighlight() : 0,
         transitions: [smoothTransition("background", motion.fast)],
       })}
     >
@@ -655,14 +655,17 @@ function ExpandedSidebar(): Element {
       })}
     >
       {/* Search + collapse (workspaces live left of the tabs and in the overview) */}
-      <Row style={{ height: 36, margin: [0, 0, 4, 0], align: "center", gap: 4, shrink: 0 }}>
+      <Row style={{
+        height: sidebarHeaderLayout.height, padding: [sidebarHeaderLayout.topInset, 0, 0, 0],
+        align: "center", gap: spacing.unit, shrink: 0,
+      }}>
         <Row
           style={{ height: spacing.control, grow: 1, minWidth: 0, padding: [0, spacing.unit, 0, spacing.unit],
             align: "center", gap: spacing.unit }}
           onPress={() => togglePalette("sessions")}
           paint={() => ({
-            radius: radii.md, background: palette().appBg, edge: palette().border, edgeWidth: spacing.hairline,
-            hover: { background: palette().panelBg, edge: hoverBorder() },
+            radius: radii.md, background: chromeTint(palette().appBg), edge: palette().border, edgeWidth: spacing.hairline,
+            hover: { background: chromeTint(palette().panelBg), edge: hoverBorder() },
             transitions: [smoothTransition("background", motion.fast), smoothTransition("edge", motion.fast)],
           })}
         >
@@ -689,7 +692,7 @@ function ExpandedSidebar(): Element {
             }}
             paint={() => ({
               radius: radii.md,
-              hover: { background: palette().sidebarActive },
+              hover: { background: chromeHighlight() },
               transitions: [smoothTransition("background", motion.fast)],
             })}
           >
@@ -797,8 +800,8 @@ function ExpandedSidebar(): Element {
         }}
         paint={() => ({
           radius: radii.lg,
-          background: accountOpen.value ? palette().sidebarActive : 0,
-          hover: { background: palette().sidebarActive },
+          background: accountOpen.value ? chromeHighlight(true) : 0,
+          hover: { background: chromeHighlight(accountOpen.value) },
           transitions: [smoothTransition("background", motion.fast)],
         })}
       >
@@ -879,8 +882,8 @@ function RailButton(props: {
         onContextMenu={props.onContextMenu}
         paint={() => ({
           radius: radii.lg,
-          background: isActive() ? palette().sidebarActive : 0,
-          hover: { background: palette().sidebarActive },
+          background: isActive() ? chromeHighlight(true) : 0,
+          hover: { background: chromeHighlight(isActive()) },
           active: { scale: controlState.iconPressScale },
           transitions: [
             smoothTransition("background", motion.fast),

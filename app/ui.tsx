@@ -143,6 +143,7 @@ interface ConfigView {
   density: DensityMode;
   fontSize: number;
   windowTransparency: number;
+  keepRunningInBackground: boolean;
   tilingMode: "niri" | "hyprland";
   layout: TilingLayoutOptions;
   checkUpdates: boolean;
@@ -201,11 +202,11 @@ interface UpdateView {
   currentVersion: string;
   availableVersion: string;
   hasUpdate: boolean;
+  checkStatus: "idle" | "checking" | "succeeded" | "failed";
   stage: string;
   progress: number;
   statusText: string;
-  assetUrl?: string | null;
-  stagedPath?: string | null;
+  asset: { url: string; size: number; sha256: string } | null;
   notes: ReleaseNotesView;
 }
 
@@ -536,6 +537,7 @@ const configState = signal<ConfigView>({
   density: "comfortable",
   fontSize: 13,
   windowTransparency: 0,
+  keepRunningInBackground: true,
   tilingMode: "niri",
   layout: { defaultColumnWidth: 0.5, centerFocusedColumn: "never", alwaysCenterSingleColumn: false },
   checkUpdates: true,
@@ -560,17 +562,19 @@ const githubState = signal<GitHubView>({
   detail: "Detecting SSH...",
 });
 
+declare const ICY_VERSION: string;
+
 const updateState = signal<UpdateView>({
-  currentVersion: "0.1.1",
-  availableVersion: "0.1.1",
+  currentVersion: ICY_VERSION,
+  availableVersion: ICY_VERSION,
   hasUpdate: false,
+  checkStatus: "idle",
   stage: "idle",
   progress: 0,
-  statusText: "Checking for updates...",
-  assetUrl: null,
-  stagedPath: null,
+  statusText: "Ready to check for updates",
+  asset: null,
   notes: {
-    version: "0.1.1",
+    version: ICY_VERSION,
     title: "icy",
     publishedAt: "Latest",
     summary: "",
@@ -1249,7 +1253,7 @@ function KbdKey(props: { label: Source<string> }): Element {
       }}
       paint={() => ({
         radius: radii.sm,
-        background: palette().kbdBg,
+        background: chromeTint(palette().kbdBg),
       })}
     >
       <Text
@@ -1291,7 +1295,7 @@ function IconButton(props: {
           radius: radii.md,
           background: highlighted() ? accent().brandSoft : 0,
           opacity: read(props.disabled ?? false) ? controlState.disabledOpacity : 1,
-          hover: { background: highlighted() ? accent().brandSoft : read(props.hoverBackground ?? palette().sidebarActive) },
+          hover: { background: highlighted() ? accent().brandSoft : chromeHighlight(false, read(props.hoverBackground ?? palette().sidebarActive)) },
           active: { scale: controlState.iconPressScale },
           transitions: [smoothTransition("background", motion.fast), smoothTransition("scale", motion.fast)],
         })}
@@ -1320,13 +1324,13 @@ function SegmentedControl<T extends string | number>(props: {
   return (
     <Row style={{ width: props.width, height: layout.height, padding: [layout.inset, layout.inset, layout.inset, layout.inset],
       gap: fixed ? 0 : layout.inset, align: "center", shrink: 0 }}
-      paint={() => ({ radius: radii.md, background: palette().appBg, edge: palette().border, edgeWidth: spacing.hairline })}>
+      paint={() => ({ radius: radii.md, background: chromeTint(palette().appBg), edge: palette().border, edgeWidth: spacing.hairline })}>
       {fixed ? (
         <Box style={() => ({
           position: "absolute", top: layout.inset, height, width,
           left: layout.inset + (width as number) * props.choices.findIndex((choice) => choice.id === props.value.value),
         })} paint={() => ({
-          radius: radii.sm, background: palette().sidebarActive, transitions: [springTransition("left")],
+          radius: radii.sm, background: chromeHighlight(true), transitions: [springTransition("left")],
         })} />
       ) : null}
       {props.choices.map((choice) => {
@@ -1341,8 +1345,8 @@ function SegmentedControl<T extends string | number>(props: {
             }}
             paint={() => ({
               radius: radii.sm,
-              background: !fixed && selected() ? palette().sidebarActive : 0,
-              hover: { background: selected() ? (fixed ? 0 : palette().sidebarActive) : palette().panelBg },
+              background: !fixed && selected() ? chromeHighlight(true) : 0,
+              hover: { background: selected() ? (fixed ? 0 : chromeHighlight(true)) : chromeHighlight(false, palette().panelBg) },
               active: { scale: controlState.pressScale },
               transitions: [smoothTransition("background", motion.fast), smoothTransition("scale", motion.fast)],
             })}>
@@ -1449,12 +1453,12 @@ function SecondaryButton(props: {
       onPress={props.onPress}
       paint={() => ({
         radius: radii.md,
-        background: palette().panelBg,
+        background: chromeTint(palette().panelBg),
         a11y: props.accessibleLabel ? { label: props.accessibleLabel } : undefined,
         opacity: read(props.disabled ?? false) ? controlState.disabledOpacity : 1,
         edge: palette().border,
         edgeWidth: spacing.hairline,
-        hover: { background: palette().sidebarActive, edge: hoverBorder() },
+        hover: { background: chromeHighlight(), edge: hoverBorder() },
         active: { scale: controlState.pressScale },
         transitions: [
           smoothTransition("background", motion.fast),
@@ -1492,7 +1496,7 @@ function ToggleSwitch(props: {
       onPress={props.onToggle}
       paint={() => ({
         radius: 9,
-        background: read(props.checked) ? accent().brand : palette().kbdBg,
+        background: read(props.checked) ? accent().brand : chromeTint(palette().kbdBg),
         edge: read(props.checked) ? accent().brand : palette().border,
         edgeWidth: spacing.hairline,
         a11y: props.label ? { role: "switch", label: props.label, checked: read(props.checked) } : undefined,
@@ -1559,7 +1563,7 @@ function MenuPanel(props: {
       style={{ width: props.width ?? spacing.menuWidth, padding: [6, 6, 6, 6] }}
       paint={() => ({
         radius: radii.popover,
-        background: palette().appBg,
+        ...popupMaterial(palette().appBg),
         edge: palette().border,
         edgeWidth: spacing.hairline,
         shadows: [shadows.menu, shadows.menuTight],
@@ -1715,8 +1719,8 @@ function MenuItem(props: {
       onPress={props.onPress}
       paint={() => ({
         radius: radii.md,
-        background: selected() ? palette().panelBg : 0,
-        hover: { background: palette().panelBg },
+        background: selected() ? chromeHighlight(true, palette().panelBg) : 0,
+        hover: { background: chromeHighlight(selected(), palette().panelBg) },
         transitions: [smoothTransition("background", motion.fast)],
       })}
     >
@@ -2014,7 +2018,13 @@ function FadeText(props: {
 }): Element {
   const layout = titleFadeLayout;
   const color = props.color;
-  const bounds = signal({ width: 0, height: 0, overflow: false });
+  const spans = props.spans;
+  const bounds = signal({ width: 0, height: 0, textWidth: 0 });
+  const overflow = () => bounds.value.width > 0 && bounds.value.textWidth > bounds.value.width + spacing.hairline;
+  const fadeWidth = () => Math.min(bounds.value.width, layout.width);
+  const fadeStart = () => bounds.value.width - fadeWidth();
+  const fadeGlyphs = () => overflow() && windowTransparency() > 0;
+  const labelColor = () => read(color ?? palette().textPrimary);
   let boxId: number | undefined;
   let textId: number | undefined;
   let pending = false;
@@ -2023,10 +2033,10 @@ function FadeText(props: {
     if (boxId === undefined || textId === undefined) return;
     const width = jsnir.columns.width[boxId] ?? 0;
     const height = jsnir.columns.height[boxId] ?? 0;
-    const overflow = width > 0 && (jsnir.columns.width[textId] ?? 0) > width + spacing.hairline;
+    const textWidth = jsnir.columns.width[textId] ?? 0;
     const previous = bounds.value;
-    if (width !== previous.width || height !== previous.height || overflow !== previous.overflow) {
-      bounds.value = { width, height, overflow };
+    if (width !== previous.width || height !== previous.height || textWidth !== previous.textWidth) {
+      bounds.value = { width, height, textWidth };
     }
   };
   const measureAfterLayout = () => {
@@ -2051,15 +2061,43 @@ function FadeText(props: {
   return (
     <Row ref={(id) => { boxId = id; measureAfterLayout(); }}
       style={{ grow: 1, shrink: 1, minWidth: 0, align: "center", clip: true }}>
-      <Box ref={(id) => { textId = id; }} style={{ shrink: 0 }}>
-        <Text font={props.font} spans={props.spans}
-          paint={color === undefined ? undefined : () => ({ color: read(color) })}>{props.text}</Text>
-      </Box>
-      <Show when={() => bounds.value.overflow} style={() => {
-        const { width, height } = bounds.value;
-        const fadeWidth = Math.min(width, layout.width);
-        return { position: "absolute", left: width - fadeWidth, top: 0, width: fadeWidth, height };
-      }}>
+      <Row style={() => ({
+        width: fadeGlyphs() ? fadeStart() : undefined, align: "center", shrink: 0, clip: fadeGlyphs(),
+      })}>
+        <Box ref={(id) => { textId = id; }} style={{ shrink: 0 }}>
+          <Text font={props.font} spans={spans}
+            paint={color === undefined ? undefined : () => ({ color: labelColor() })}>{props.text}</Text>
+        </Box>
+      </Row>
+      <Show when={fadeGlyphs} style={() => ({
+        position: "absolute", left: 0, top: 0, width: bounds.value.width, height: bounds.value.height,
+      })}>
+        {() => <Box style={{ grow: 1 }}>{Array.from({ length: layout.alphaSteps }, (_, index) => {
+          const stepWidth = () => fadeWidth() / layout.alphaSteps;
+          const start = () => fadeStart() + index * stepWidth();
+          const alpha = 1 - (index + 0.5) / layout.alphaSteps;
+          // Each strip draws the same glyphs at their original positions with a lower alpha.
+          return (
+            <Box style={() => ({
+              position: "absolute", left: start(), top: 0, width: stepWidth(), height: bounds.value.height, clip: true,
+            })}>
+              <Row style={() => ({
+                position: "absolute", left: -start(), top: 0,
+                width: bounds.value.textWidth, height: bounds.value.height, align: "center",
+              })}>
+                <Text style={{ shrink: 0 }} font={props.font}
+                  spans={spans === undefined ? undefined : () => read(spans).map((span) => ({
+                    ...span, color: withAlpha(span.color ?? labelColor(), alpha),
+                  }))}
+                  paint={() => ({ color: withAlpha(labelColor(), alpha), a11y: { hidden: true } })}>{props.text}</Text>
+              </Row>
+            </Box>
+          );
+        })}</Box>}
+      </Show>
+      <Show when={() => overflow() && !fadeGlyphs()} style={() => ({
+        position: "absolute", left: fadeStart(), top: 0, width: fadeWidth(), height: bounds.value.height,
+      })}>
         {() => <Image source="ui:text-fade" style={{ grow: 1 }} paint={() => ({
           color: read(props.background), a11y: { hidden: true },
           transitions: [smoothTransition("color", motion.fast)],

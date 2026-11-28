@@ -107,8 +107,8 @@ function LauncherRow(props: { row: () => LaunchRow; selected: () => boolean; onP
       onPress={props.onPress}
       paint={() => ({
         radius: radii.md,
-        background: props.selected() ? palette().sidebarActive : 0,
-        hover: { background: props.selected() ? palette().sidebarActive : rowHoverBackground() },
+        background: props.selected() ? chromeHighlight(true) : 0,
+        hover: { background: props.selected() ? chromeHighlight(true) : rowHoverBackground() },
         transitions: [smoothTransition("background", motion.fast)],
       })}>
       <Dynamic value={() => `${row().depth}:${row().last}:${row().stem}`} style={{ shrink: 0 }}>
@@ -153,8 +153,8 @@ function LauncherPlace(props: { name: Source<string>; glyph: string; count: Sour
       onPress={props.onPress}
       paint={() => ({
         radius: radii.md,
-        background: props.active() ? palette().sidebarActive : 0,
-        hover: { background: props.active() ? palette().sidebarActive : rowHoverBackground() },
+        background: props.active() ? chromeHighlight(true) : 0,
+        hover: { background: props.active() ? chromeHighlight(true) : rowHoverBackground() },
         transitions: [smoothTransition("background", motion.fast)],
       })}>
       <Glyph name={props.glyph} size={layout.icon}
@@ -390,7 +390,7 @@ function LauncherFolders(props: { cwd: string; target: LauncherTarget; back: () 
       </LauncherSearchBar>
       {/* Folders and the confirm bar share one floating panel under the search bar. */}
       <Column style={{ grow: 1, minHeight: 0, clip: true }} onPress={() => {}}
-        paint={() => ({ ...floatingSurface(), ...accordeeMenuMotion("top") })}>
+        paint={() => ({ ...floatingSurface(true), ...accordeeMenuMotion("top") })}>
       <Row style={{ grow: 1, minHeight: 0 }}>
         <Show when={() => launcherWidth() >= layout.compactAt} style={{ shrink: 0 }}>
           {placesColumn}

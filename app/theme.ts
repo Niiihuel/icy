@@ -382,6 +382,7 @@ const iconButtonLayout = {
 
 const titleFadeLayout = {
   width: spacing.unit * 4,
+  alphaSteps: 4,
   measureDelay: 16,
 };
 
@@ -439,6 +440,37 @@ function windowUnderlay(color: number): number {
   return windowTransparency() > 0 ? 0 : color;
 }
 
+// Chrome shares the compositor's backdrop. Only floating surfaces blur app content.
+const glassChrome = {
+  controlAlpha: 0.58,
+  surfaceAlpha: 0.56,
+  scrimAlpha: 0.32,
+  hoverAlpha: 0.06,
+  selectedAlpha: 0.12,
+};
+
+function chromeTint(color: number, alpha = glassChrome.controlAlpha): number {
+  return windowTransparency() > 0 ? withAlpha(color, alpha) : color;
+}
+
+function chromeHighlight(selected = false, solid = palette().sidebarActive): number {
+  return windowTransparency() > 0
+    ? withAlpha(palette().textPrimary, selected ? glassChrome.selectedAlpha : glassChrome.hoverAlpha)
+    : solid;
+}
+
+function popupMaterial(color: number): Paint {
+  return windowTransparency() > 0
+    ? { background: chromeTint(color, glassChrome.surfaceAlpha), backdropBlur: floatingLayout.surfaceBlur }
+    : { background: color };
+}
+
+function modalScrim(): Paint {
+  return windowTransparency() > 0
+    ? { background: chromeTint(palette().backdrop, glassChrome.scrimAlpha), backdropBlur: floatingLayout.backdropBlur }
+    : { background: palette().backdrop };
+}
+
 function mixColor(a: number, b: number, t: number): number {
   const ch = (c: number, shift: number) => (c >>> shift) & 255;
   const lerp = (shift: number) => Math.round(ch(a, shift) + (ch(b, shift) - ch(a, shift)) * t);
@@ -451,9 +483,12 @@ function hoverBorder(): number {
 
 // The one surface of the floating chrome (`floatingLayout`): search bars, results panels,
 // suggestions and pills.
-function floatingSurface(): Paint {
-  return { radius: radii.lg, background: withAlpha(palette().cardBg, floatingLayout.surfaceAlpha),
-    backdropBlur: floatingLayout.surfaceBlur, backdropSaturation: floatingLayout.saturation,
+function floatingSurface(blurredBackdrop = false): Paint {
+  const glass = windowTransparency() > 0;
+  return { radius: radii.lg,
+    background: withAlpha(palette().cardBg, glass ? glassChrome.surfaceAlpha : floatingLayout.surfaceAlpha),
+    backdropBlur: glass && blurredBackdrop ? 0 : floatingLayout.surfaceBlur,
+    backdropSaturation: floatingLayout.saturation,
     edge: palette().border, edgeWidth: spacing.hairline, shadows: [shadows.card] };
 }
 
@@ -546,6 +581,11 @@ const workspaceTabLayout = {
   stripGap: spacing.unit / 2,
   icon: 15,
   inset: spacing.hairline * 2,
+};
+
+const sidebarHeaderLayout = {
+  height: spacing.headerHeight,
+  topInset: spacing.headerHeight - workspaceTabLayout.height + workspaceTabLayout.stroke * 2,
 };
 
 const horizontalStripLayout = {

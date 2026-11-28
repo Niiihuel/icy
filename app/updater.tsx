@@ -14,6 +14,25 @@ function updateFailed(): boolean {
   return updateState.value.stage === "error";
 }
 
+function updateChecking(): boolean {
+  return updateState.value.checkStatus === "checking";
+}
+
+function updateCheckAvailable(): boolean {
+  return !updateChecking() && !updateBusy() && !updateReady();
+}
+
+function updateStatusText(): string {
+  const up = updateState.value;
+  if (updateChecking()) return "Checking for updates…";
+  if (up.checkStatus === "failed" && !updateBusy() && !updateReady() && !updateFailed()) {
+    return up.hasUpdate
+      ? "Could not refresh the release feed. The last known update is still available."
+      : "Could not check for updates. Try again later.";
+  }
+  return up.statusText;
+}
+
 function shortVersion(v: string): string {
   return v.split("-")[0];
 }
@@ -328,7 +347,7 @@ function UpdateChip({ compact = false }: { compact?: boolean }): Element {
             font={{ family: fontFamilies.sans, size: typeScale.caption, lineHeight: 1.45 }}
             paint={() => ({ color: updateFailed() ? palette().warningText : palette().textSecondary })}
           >
-            {() => up().statusText}
+            {updateStatusText}
           </Text>
 
           <Show when={() => updateBusy() || updateReady()}>
@@ -336,14 +355,16 @@ function UpdateChip({ compact = false }: { compact?: boolean }): Element {
           </Show>
         </Column>
         <MenuSeparator />
-        <MenuItem
+        <Show when={() => !!up().asset || updateReady()}>{() => <MenuItem
           icon={() => (updateReady() ? "refresh" : "download")}
           label={() =>
             updateReady()
               ? "Install & restart"
               : updateBusy()
                 ? `Downloading… ${up().progress}%`
-                : updateFailed()
+                : updateChecking()
+                  ? "Checking…"
+                  : updateFailed()
                   ? "Retry download"
                   : "Download update"
           }
@@ -351,11 +372,11 @@ function UpdateChip({ compact = false }: { compact?: boolean }): Element {
             if (updateReady()) {
               installPopoverOpen.value = false;
               restartConfirmOpen.value = true;
-            } else if (!updateBusy()) {
+            } else if (updateCheckAvailable()) {
               startUpdateDownload();
             }
           }}
-        />
+        />}</Show>
         <ReleaseNotesMenuItem
           label="What's new"
           onPress={() => {
@@ -417,7 +438,7 @@ function ReleaseNotesModal(): Element {
           onPress={close}
           onDismiss={close}
           paint={() => ({
-            background: palette().backdrop,
+            ...modalScrim(),
             starting: { opacity: 0 },
             transitions: [smoothTransition("opacity", motion.base)],
           })}
@@ -429,7 +450,7 @@ function ReleaseNotesModal(): Element {
             })}
             onPress={() => {}}
             paint={() => ({
-              radius: radii.xxl, background: palette().cardBg, edge: palette().border,
+              radius: radii.xxl, background: chromeTint(palette().cardBg, glassChrome.surfaceAlpha), edge: palette().border,
               edgeWidth: spacing.hairline, shadows: [shadows.modal],
               a11y: { role: "dialog", label: "Release notes", modal: true },
               ...accordeeDialogMotion(),
@@ -551,13 +572,13 @@ function ReleaseNotesModal(): Element {
               background: palette().panelBg, edge: palette().border, edgeSides: [spacing.hairline, 0, 0, 0],
             })}>
               <GhostButton icon="external-link" label="View on GitHub" onPress={() => openExternal(notes().releaseUrl)} />
-              <Show when={() => updateState.value.hasUpdate || updateReady()}>
+              <Show when={() => !!updateState.value.asset || updateReady()}>
                 {() => (
                   <PrimaryButton
                     label={() => updateReady() ? "Install & Restart"
                       : updateBusy() ? `Downloading ${updateState.value.progress}%` : "Download Update"}
                     height={spacing.button}
-                    disabled={updateBusy}
+                    disabled={() => updateBusy() || updateChecking()}
                     onPress={update}
                   />
                 )}
@@ -591,7 +612,7 @@ function RestartConfirmModal(): Element {
             restartConfirmOpen.value = false;
           }}
           paint={() => ({
-            background: palette().backdrop,
+            ...modalScrim(),
             starting: { opacity: 0 },
             transitions: [smoothTransition("opacity", motion.base)],
           })}
@@ -601,7 +622,7 @@ function RestartConfirmModal(): Element {
             onPress={() => {}}
             paint={() => ({
               radius: radii.xxl,
-              background: palette().cardBg,
+              background: chromeTint(palette().cardBg, glassChrome.surfaceAlpha),
               edge: palette().border,
               edgeWidth: spacing.hairline,
               shadows: [shadows.modal],

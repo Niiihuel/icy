@@ -6,14 +6,96 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use semver::Version;
 use serde::Serialize;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::platform;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RELEASES_API_URL: &str = "https://api.github.com/repos/Niiihuel/icy/releases/latest";
 const RELEASES_WEB_URL: &str = "https://github.com/Niiihuel/icy/releases";
+const CHECK_INTERVAL: Duration = Duration::from_hours(4);
+const FIRST_RETRY: Duration = Duration::from_mins(5);
+const MAX_RETRY: Duration = Duration::from_hours(1);
+
+pub struct CheckSchedule {
+    enabled: bool,
+    next: Instant,
+    retry: Duration,
+    rate_limited_until: Instant,
+}
+
+impl CheckSchedule {
+    pub fn new(enabled: bool, now: Instant) -> Self {
+        Self {
+            enabled,
+            next: now,
+            retry: FIRST_RETRY,
+            rate_limited_until: now,
+        }
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool, now: Instant) {
+        if enabled && !self.enabled {
+            self.next = now;
+            self.retry = FIRST_RETRY;
+        }
+        self.enabled = enabled;
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        self.enabled
+            .then_some(self.next.max(self.rate_limited_until))
+    }
+
+    pub fn can_check(&self, now: Instant) -> bool {
+        now >= self.rate_limited_until
+    }
+
+    pub fn complete(&mut self, now: Instant, error: Option<&CheckError>) {
+        if let Some(error) = error {
+            self.next = now + self.retry;
+            self.retry = (self.retry * 2).min(MAX_RETRY);
+            if let Some(delay) = error.retry_after.and_then(|delay| now.checked_add(delay)) {
+                self.rate_limited_until = delay;
+            }
+        } else {
+            self.next = now + CHECK_INTERVAL;
+            self.retry = FIRST_RETRY;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckStatus {
+    #[default]
+    Idle,
+    Checking,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReleaseAsset {
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Default)]
+pub struct CheckError {
+    retry_after: Option<Duration>,
+}
+
+pub struct CheckedRelease {
+    pub release: UpdateState,
+    pub etag: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,11 +126,13 @@ pub struct UpdateState {
     pub current_version: String,
     pub available_version: String,
     pub has_update: bool,
+    pub check_status: CheckStatus,
     pub stage: String,
     pub progress: u8,
     pub status_text: String,
-    pub asset_url: Option<String>,
-    pub staged_path: Option<String>,
+    pub asset: Option<ReleaseAsset>,
+    #[serde(skip)]
+    pub staged_path: Option<PathBuf>,
     pub notes: ReleaseNotes,
 }
 
@@ -58,13 +142,19 @@ impl UpdateState {
             current_version: CURRENT_VERSION.into(),
             available_version: CURRENT_VERSION.into(),
             has_update: false,
+            check_status: CheckStatus::Idle,
             stage: "idle".into(),
             progress: 0,
             status_text: "Ready to check for updates".into(),
-            asset_url: None,
+            asset: None,
             staged_path: None,
             notes: default_release_notes(CURRENT_VERSION),
         }
+    }
+
+    pub fn can_check(&self) -> bool {
+        self.check_status != CheckStatus::Checking
+            && matches!(self.stage.as_str(), "idle" | "error")
     }
 }
 
@@ -243,150 +333,228 @@ pub fn fetch_release_image(url: &str) -> Option<tempfile::TempPath> {
     (w > 0 && h > 0 && u64::from(w) * u64::from(h) <= MAX_PIXELS).then_some(path)
 }
 
-/// Checks GitHub Releases for a newer `Niiihuel/icy` tag. Falls back cleanly to local
-/// release notes preview when offline or before the first GitHub tag is published.
-pub fn check_latest_release() -> UpdateState {
-    let output = Command::new("curl")
+fn curl() -> Command {
+    let mut command = platform::background_command("curl");
+    command
+        .args(["-q", "-sSL", "--proto", "=https", "--proto-redir", "=https"])
+        .stdin(Stdio::null());
+    command
+}
+
+fn retry_after<'a>(header: &impl Fn(&str) -> Option<&'a str>, now: SystemTime) -> Option<Duration> {
+    let seconds = |key| header(key)?.parse::<u64>().ok();
+    if let Some(delay) = seconds("retry-after") {
+        return Some(Duration::from_secs(delay));
+    }
+    if header("x-ratelimit-remaining") == Some("0") {
+        let reset = UNIX_EPOCH.checked_add(Duration::from_secs(seconds("x-ratelimit-reset")?))?;
+        return reset.duration_since(now).ok();
+    }
+    None
+}
+
+/// Checks the public stable release feed. A conditional response keeps the last known release.
+pub fn check_latest_release(etag: Option<&str>) -> Result<Option<CheckedRelease>, CheckError> {
+    let temp = tempfile::tempdir().map_err(|_| CheckError::default())?;
+    let headers = temp.path().join("headers");
+    let mut command = curl();
+    command
         .args([
-            "-fsSL",
             "--connect-timeout",
             "4",
             "--max-time",
-            "6",
+            "10",
+            "--max-filesize",
+            "2097152",
             "-H",
             "Accept: application/vnd.github+json",
             "-H",
             "User-Agent: icy-updater",
-            RELEASES_API_URL,
+            "--dump-header",
         ])
-        .stdin(Stdio::null())
-        .output();
-
-    if let Ok(out) = output
-        && out.status.success()
-        && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
-        && let Some(tag) = val.get("tag_name").and_then(|v| v.as_str())
-    {
-        let version = tag.trim_start_matches('v').to_string();
-        let has_update = is_newer_version(&version, CURRENT_VERSION);
-        let title = val
-            .get("name")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(tag)
-            .to_string();
-        let body = val
-            .get("body")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let published_at = val
-            .get("published_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Recently")
-            .chars()
-            .take(10)
-            .collect();
-        let html_url = val
-            .get("html_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or(RELEASES_WEB_URL)
-            .to_string();
-
-        let target_stem = platform::release_asset_name();
-        let asset_url = val
-            .get("assets")
-            .and_then(|a| a.as_array())
-            .and_then(|arr| {
-                arr.iter().find_map(|asset| {
-                    let name = asset.get("name")?.as_str()?;
-                    if name.contains(target_stem) {
-                        asset
-                            .get("browser_download_url")
-                            .and_then(|u| u.as_str())
-                            .map(str::to_string)
-                    } else {
-                        None
-                    }
-                })
-            });
-
-        let assets = val
-            .get("assets")
-            .and_then(|v| v.as_array())
-            .map_or(&[][..], Vec::as_slice);
-        let (summary, highlights, media) = release_content(&body, assets);
-
-        return UpdateState {
-            current_version: CURRENT_VERSION.into(),
-            available_version: version.clone(),
-            has_update,
-            stage: "idle".into(),
-            progress: 0,
-            status_text: if has_update {
-                format!("Update v{version} available")
-            } else {
-                format!("Up to date (v{CURRENT_VERSION})")
-            },
-            asset_url,
-            staged_path: None,
-            notes: ReleaseNotes {
-                version,
-                title,
-                published_at,
-                summary,
-                highlights,
-                media,
-                release_url: html_url,
-            },
-        };
+        .arg(&headers);
+    if let Some(etag) = etag {
+        command.arg("-H").arg(format!("If-None-Match: {etag}"));
+    }
+    let output = command
+        .arg(RELEASES_API_URL)
+        .output()
+        .map_err(|_| CheckError::default())?;
+    if !output.status.success() {
+        return Err(CheckError::default());
     }
 
-    // Offline or no published release yet: never invent an update.
-    let mut fallback = UpdateState::initial();
-    fallback.status_text = format!("Up to date (v{CURRENT_VERSION})");
-    fallback
+    let headers = fs::read_to_string(headers).map_err(|_| CheckError::default())?;
+    let response = headers
+        .rsplit("\r\n\r\n")
+        .find(|block| block.starts_with("HTTP/"))
+        .ok_or_else(CheckError::default)?;
+    let header = |key: &str| {
+        response
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.trim())
+    };
+    match response.split_whitespace().nth(1) {
+        Some("304") if etag.is_some() => Ok(None),
+        Some("200") => {
+            let value =
+                serde_json::from_slice(&output.stdout).map_err(|_| CheckError::default())?;
+            let release = parse_release(&value, CURRENT_VERSION, platform::release_asset_name())
+                .ok_or_else(CheckError::default)?;
+            let etag = header("etag")
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            Ok(Some(CheckedRelease { release, etag }))
+        }
+        Some("403" | "429" | "503") => Err(CheckError {
+            retry_after: retry_after(&header, SystemTime::now()),
+        }),
+        _ => Err(CheckError::default()),
+    }
 }
 
-/// Downloads the published release asset for this platform, invoking
-/// `on_progress(stage, percent, status)` as it advances.
+fn stable_version(tag: &str) -> Option<Version> {
+    let version = Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()?;
+    version.pre.is_empty().then_some(version)
+}
+
+fn release_asset(asset: &Value, tag: &str, asset_name: &str) -> Option<ReleaseAsset> {
+    if asset["name"].as_str()? != asset_name || asset["state"].as_str()? != "uploaded" {
+        return None;
+    }
+    let url = asset["browser_download_url"].as_str()?;
+    let path = url.strip_prefix("https://github.com/Niiihuel/icy/releases/download/")?;
+    let (release, filename) = path.split_once('/')?;
+    if release.replace("%2B", "+") != tag || filename != asset_name {
+        return None;
+    }
+    let size = asset["size"].as_u64().filter(|size| *size > 0)?;
+    let sha256 = asset["digest"].as_str()?.strip_prefix("sha256:")?;
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(ReleaseAsset {
+        url: url.into(),
+        size,
+        sha256: sha256.to_ascii_lowercase(),
+    })
+}
+
+fn parse_release(value: &Value, current: &str, asset_name: &str) -> Option<UpdateState> {
+    if value["draft"].as_bool()? || value["prerelease"].as_bool()? {
+        return None;
+    }
+    let tag = value["tag_name"].as_str()?;
+    let candidate = stable_version(tag)?;
+    let installed = Version::parse(current).ok()?;
+    let has_update = candidate.cmp_precedence(&installed).is_gt();
+    let version = candidate.to_string();
+    let title = value["name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(tag);
+    let body = value["body"].as_str().unwrap_or("");
+    let published_at = value["published_at"]
+        .as_str()
+        .unwrap_or("Recently")
+        .chars()
+        .take(10)
+        .collect();
+    let html_url = value["html_url"]
+        .as_str()
+        .filter(|url| url.starts_with("https://github.com/Niiihuel/icy/releases/tag/"))
+        .unwrap_or(RELEASES_WEB_URL);
+    let assets = value["assets"].as_array().map_or(&[][..], Vec::as_slice);
+    let asset = if has_update {
+        assets
+            .iter()
+            .find_map(|asset| release_asset(asset, tag, asset_name))
+    } else {
+        None
+    };
+    let (summary, highlights, media) = release_content(body, assets);
+
+    Some(UpdateState {
+        current_version: current.into(),
+        available_version: version.clone(),
+        has_update,
+        check_status: CheckStatus::Succeeded,
+        status_text: match (&asset, has_update) {
+            (Some(_), _) => format!("Update v{version} available"),
+            (None, true) => {
+                "No verified in-app download for this platform. See the release on GitHub.".into()
+            }
+            (None, false) => format!("Up to date (v{current})"),
+        },
+        asset,
+        notes: ReleaseNotes {
+            version,
+            title: title.into(),
+            published_at,
+            summary,
+            highlights,
+            media,
+            release_url: html_url.into(),
+        },
+        ..UpdateState::initial()
+    })
+}
+
+fn verify_download(path: &Path, asset: &ReleaseAsset) -> Result<(), String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("Cannot read the update: {e}"))?;
+    let size = file
+        .metadata()
+        .map_err(|e| format!("Cannot read the update size: {e}"))?
+        .len();
+    if size != asset.size {
+        return Err("Downloaded update has an unexpected size".into());
+    }
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|e| format!("Cannot verify the update: {e}"))?;
+    if format!("{:x}", hasher.finalize()) != asset.sha256 {
+        return Err("Downloaded update failed its SHA-256 check".into());
+    }
+    Ok(())
+}
+
+/// Downloads and verifies the published executable before exposing it to the installer.
 pub fn download_and_stage(
-    asset_url: Option<&str>,
-    version: &str,
+    asset: &ReleaseAsset,
     mut on_progress: impl FnMut(&str, u8, &str),
 ) -> Result<PathBuf, String> {
-    let Some(url) = asset_url else {
-        return Err("No release binary published for this platform".into());
-    };
-    let stage_dir = env::temp_dir().join("icy-updates");
-    fs::create_dir_all(&stage_dir).map_err(|e| format!("cannot create staging dir: {e}"))?;
-    let staged_file = stage_dir.join(format!("icy-{version}.staged"));
-
+    let staged = tempfile::Builder::new()
+        .prefix("icy-update-")
+        .suffix(".staged")
+        .tempfile()
+        .map_err(|e| format!("Cannot create the staging file: {e}"))?
+        .into_temp_path();
     on_progress("downloading", 35, "Downloading release binary...");
-    let status = Command::new("curl")
+    let status = curl()
         .args([
-            "-fsSL",
+            "-f",
             "--connect-timeout",
             "10",
             "--max-time",
             "120",
-            "-o",
+            "--max-filesize",
         ])
-        .arg(&staged_file)
-        .arg(url)
-        .stdin(Stdio::null())
+        .arg(asset.size.to_string())
+        .arg("-o")
+        .arg(&staged)
+        .arg("--")
+        .arg(&asset.url)
         .status()
-        .map_err(|e| format!("failed to run curl: {e}"))?;
+        .map_err(|e| format!("Failed to run curl: {e}"))?;
     if !status.success() {
         return Err("Download failed from GitHub Releases".into());
     }
     on_progress("verifying", 82, "Verifying staged binary...");
-    let meta = fs::metadata(&staged_file).map_err(|e| format!("staged file missing: {e}"))?;
-    if meta.len() == 0 {
-        return Err("Downloaded update file is empty".into());
-    }
-    on_progress("ready", 100, "Ready to install & restart");
-    Ok(staged_file)
+    verify_download(&staged, asset)?;
+    staged
+        .keep()
+        .map_err(|e| format!("Cannot stage the update: {e}"))
 }
 
 /// Applies the staged binary and triggers automatic OS-level restart.
@@ -394,19 +562,6 @@ pub fn apply_staged_and_restart(staged_path: &Path) -> Result<(), String> {
     let current_exe = env::current_exe().map_err(|e| format!("cannot locate current exe: {e}"))?;
     platform::spawn_self_update_installer(staged_path, &current_exe)
         .map_err(|e| format!("failed to launch updater helper: {e}"))
-}
-
-pub fn is_newer_version(candidate: &str, current: &str) -> bool {
-    let parse = |s: &str| -> (u32, u32, u32) {
-        let core = s.split('-').next().unwrap_or(s);
-        let mut parts = core.split('.').filter_map(|p| p.parse::<u32>().ok());
-        (
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
-        )
-    };
-    parse(candidate) > parse(current)
 }
 
 #[cfg(test)]
@@ -447,10 +602,102 @@ A new workspace.
     }
 
     #[test]
-    fn compares_semver_versions() {
-        assert!(is_newer_version("0.2.0", "0.1.0"));
-        assert!(is_newer_version("1.0.0", "0.9.9"));
-        assert!(!is_newer_version("0.1.0", "0.1.0"));
-        assert!(!is_newer_version("0.0.9", "0.1.0"));
+    fn stable_release_uses_the_exact_verified_executable() {
+        let asset_name = "icy-windows-x86_64.exe";
+        let url = format!("{RELEASES_WEB_URL}/download/v0.1.12/{asset_name}");
+        let digest = "ab".repeat(32);
+        let mut release = serde_json::json!({
+            "tag_name": "v0.1.12", "draft": false, "prerelease": false,
+            "assets": [
+                {"name": "old-icy-windows-x86_64.exe", "size": 1, "state": "uploaded", "digest": format!("sha256:{digest}")},
+                {"name": asset_name, "browser_download_url": url, "size": 123,
+                    "state": "uploaded", "digest": format!("sha256:{digest}")},
+            ]
+        });
+        let available = parse_release(&release, "0.1.2", asset_name).unwrap();
+        assert!(available.has_update);
+        assert_eq!(
+            available.asset.unwrap(),
+            ReleaseAsset {
+                url,
+                size: 123,
+                sha256: digest
+            }
+        );
+        assert!(
+            !parse_release(&release, "0.1.12+local", asset_name)
+                .unwrap()
+                .has_update
+        );
+        assert!(
+            !parse_release(&release, "1.0.0", asset_name)
+                .unwrap()
+                .has_update
+        );
+        release["assets"][1]["digest"] = Value::Null;
+        let manual = parse_release(&release, "0.1.2", asset_name).unwrap();
+        assert!(manual.has_update && manual.asset.is_none());
+        for tag in ["v0.1.12-rc.1", "v0.x.12", "v01.2.3"] {
+            release["tag_name"] = tag.into();
+            assert!(parse_release(&release, "0.1.2", asset_name).is_none());
+        }
+        release["tag_name"] = "v0.1.12".into();
+        release["draft"] = true.into();
+        assert!(parse_release(&release, "0.1.2", asset_name).is_none());
+        release["draft"] = false.into();
+        release["prerelease"] = true.into();
+        assert!(parse_release(&release, "0.1.2", asset_name).is_none());
+    }
+
+    #[test]
+    fn automatic_checks_back_off_and_respect_rate_limits_and_the_preference() {
+        let now = Instant::now();
+        let mut schedule = CheckSchedule::new(false, now);
+        assert_eq!(schedule.deadline(), None);
+        assert!(schedule.can_check(now)); // Manual checks remain available.
+        schedule.set_enabled(true, now);
+        assert_eq!(schedule.deadline(), Some(now));
+        schedule.complete(now, Some(&CheckError::default()));
+        let next = now + FIRST_RETRY;
+        assert_eq!(schedule.deadline(), Some(next));
+        schedule.complete(next, Some(&CheckError::default()));
+        assert_eq!(schedule.deadline(), Some(next + FIRST_RETRY * 2));
+        let limited = CheckError {
+            retry_after: Some(Duration::from_hours(2)),
+        };
+        schedule.complete(next, Some(&limited));
+        let reset = next + limited.retry_after.unwrap();
+        assert_eq!(schedule.deadline(), Some(reset));
+        assert!(!schedule.can_check(next));
+        schedule.set_enabled(false, next);
+        assert_eq!(schedule.deadline(), None);
+        schedule.set_enabled(true, next);
+        assert_eq!(schedule.deadline(), Some(reset));
+        schedule.complete(reset, None);
+        assert_eq!(schedule.deadline(), Some(reset + CHECK_INTERVAL));
+    }
+
+    #[test]
+    fn staged_download_rejects_truncation_and_same_size_tampering() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let asset = ReleaseAsset {
+            url: String::new(),
+            size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+        };
+        fs::write(file.path(), b"abc").unwrap();
+        verify_download(file.path(), &asset).unwrap();
+        fs::write(file.path(), b"ab").unwrap();
+        assert!(
+            verify_download(file.path(), &asset)
+                .unwrap_err()
+                .contains("size")
+        );
+        fs::write(file.path(), b"abd").unwrap();
+        assert!(
+            verify_download(file.path(), &asset)
+                .unwrap_err()
+                .contains("SHA-256")
+        );
     }
 }

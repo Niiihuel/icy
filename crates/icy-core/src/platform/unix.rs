@@ -10,6 +10,10 @@ use std::process::{Command, Stdio};
 use super::parse_desktop_exec;
 use super::{EditorLaunchStyle, ExternalEditor, build_editor_args};
 
+pub(super) fn background_command(program: &str) -> Command {
+    Command::new(program)
+}
+
 pub(super) fn default_shell() -> (String, Vec<String>) {
     let shell = env::var("SHELL")
         .ok()
@@ -112,6 +116,25 @@ pub(crate) fn session_server_command(executable: &Path, _dir: &Path) -> io::Resu
         });
     }
     Ok(command)
+}
+
+pub(crate) fn spawn_detached_app(executable: &Path) -> io::Result<()> {
+    let mut command = Command::new(executable);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: the child only calls the async-signal-safe setsid before exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()?;
+    Ok(())
 }
 
 pub(super) fn open_external(target: &str) -> io::Result<()> {

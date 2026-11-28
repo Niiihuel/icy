@@ -34,6 +34,9 @@ pub struct IcyConfig {
     /// Transparency of the native window background as a percentage (0 is solid).
     #[serde(default, deserialize_with = "deserialize_window_transparency")]
     pub window_transparency: u8,
+    /// Keep the session server (and its system tray icon) alive when closing the window.
+    #[serde(default = "default_true")]
+    pub keep_running_in_background: bool,
     pub tiling_mode: TilingMode,
     /// niri layout options (default column width, center-focused-column, …).
     #[serde(default)]
@@ -63,6 +66,7 @@ impl Default for IcyConfig {
             density: "comfortable".into(),
             font_size: 13,
             window_transparency: 0,
+            keep_running_in_background: true,
             tiling_mode: TilingMode::Niri,
             layout: Default::default(),
             check_updates: true,
@@ -74,6 +78,10 @@ impl Default for IcyConfig {
             preferred_editor: None,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn window_transparency_percent(value: i64) -> u8 {
@@ -638,6 +646,7 @@ mod tests {
         let cfg = IcyConfig {
             density: "compact".into(),
             window_transparency: 35,
+            keep_running_in_background: false,
             agent_notifications: NotificationPreferences {
                 needs_input: true,
                 ..Default::default()
@@ -649,6 +658,7 @@ mod tests {
         let loaded = load_config_from(&cfg_path);
         assert_eq!(loaded.density, "compact");
         assert_eq!(loaded.window_transparency, 35);
+        assert!(!loaded.keep_running_in_background);
         assert_eq!(loaded.agent_notifications, cfg.agent_notifications);
         assert_eq!(loaded.preferred_editor.as_deref(), Some("cursor"));
 
@@ -662,10 +672,15 @@ mod tests {
         raw_val
             .as_object_mut()
             .unwrap()
+            .remove("keepRunningInBackground");
+        raw_val
+            .as_object_mut()
+            .unwrap()
             .remove("agentNotifications");
         let legacy: IcyConfig = serde_json::from_value(raw_val.clone()).unwrap();
         assert_eq!(legacy.preferred_editor, None);
         assert_eq!(legacy.window_transparency, 0);
+        assert!(legacy.keep_running_in_background);
         assert_eq!(
             legacy.agent_notifications,
             NotificationPreferences::default()

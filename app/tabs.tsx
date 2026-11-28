@@ -16,6 +16,7 @@ function GhostButton(props: {
     <Row
       style={{
         height: spacing.button,
+        margin: [spacing.headerHeight - workspaceTabLayout.height, 0, 0, 0],
         padding: props.label !== undefined ? [0, 10, 0, 8] : [0, 7, 0, 7],
         align: "center",
         gap: 6,
@@ -24,8 +25,8 @@ function GhostButton(props: {
       onPress={props.onPress}
       paint={() => ({
         radius: radii.md,
-        background: active() ? palette().panelBg : 0,
-        hover: { background: palette().panelBg },
+        background: active() ? chromeHighlight(true, palette().panelBg) : 0,
+        hover: { background: chromeHighlight(active(), palette().panelBg) },
         active: { scale: controlState.pressScale },
         transitions: [
           smoothTransition("background", motion.fast),
@@ -170,7 +171,7 @@ function TabBar(): Element {
               width: outlineWidth(), height: layout.height,
             })}
             paint={() => ({
-              opacity: activeItem() ? 1 : 0,
+              opacity: activeItem() && windowTransparency() === 0 ? 1 : 0,
               transitions: resize.value === null
                 ? [springTransition("left"), smoothTransition("opacity", motion.fast)] : [],
             })}
@@ -221,7 +222,9 @@ function TabBar(): Element {
                   })}
                     paint={() => ({
                       radius: radii.md,
-                      background: hovered.value && !isActive() ? palette().sidebarActive : 0,
+                      background: isActive()
+                        ? windowTransparency() > 0 ? chromeHighlight(true) : 0
+                        : hovered.value ? chromeHighlight() : 0,
                       transitions: [smoothTransition("background", motion.fast)],
                     })} />
                   <Dynamic value={() => (tile() ? tileGlyph(tile() as TileSpec) : "")} style={{ shrink: 0 }}>
@@ -238,6 +241,7 @@ function TabBar(): Element {
                     }
                   </Dynamic>
                   <FadeText
+                    layoutChanged={width}
                     text={() => {
                       const spec = tile();
                       const s = session();
@@ -258,7 +262,7 @@ function TabBar(): Element {
                     paint={() => ({
                       radius: radii.sm,
                       opacity: isActive() || hovered.value ? 1 : 0,
-                      hover: { background: palette().kbdBg },
+                      hover: { background: chromeHighlight(false, palette().kbdBg) },
                       transitions: [smoothTransition("opacity", motion.fast), smoothTransition("background", motion.fast)],
                     })}
                   >

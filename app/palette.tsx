@@ -204,7 +204,7 @@ function LauncherSearchBar(props: { children: Element | Element[] }): Element {
     <Row style={{ height: floatingLayout.searchHeight, padding: [0, layout.gutter, 0, layout.gutter],
       align: "center", gap: layout.rowInset, shrink: 0 }}
       onPress={() => {}}
-      paint={() => ({ ...floatingSurface(), ...accordeeMenuMotion("top") })}>
+      paint={() => ({ ...floatingSurface(true), ...accordeeMenuMotion("top") })}>
       {props.children}
     </Row>
   );
@@ -241,7 +241,9 @@ function PaletteBackdrop(props: { children: Element | Element[] }): Element {
         align: "center", padding: [floatingTop(), 0, 0, 0], layer: launcherLayout.layer,
       })}
       onPress={closePalette}
-      paint={() => ({ background: withAlpha(palette().backdrop, floatingLayout.backdropDim),
+      paint={() => ({
+        background: withAlpha(palette().backdrop,
+          windowTransparency() > 0 ? glassChrome.scrimAlpha : floatingLayout.backdropDim),
         backdropBlur: floatingLayout.backdropBlur, backdropSaturation: floatingLayout.saturation,
         // The blur grows in and out with the dim, as in the reference video.
         starting: { opacity: 0, backdropBlur: 0 }, exiting: { opacity: 0, backdropBlur: 0 },
@@ -374,7 +376,7 @@ function SearchPaletteBody(props: { request: PaletteRequest }): Element {
       <Box style={() => ({ height: panelHeight(), minHeight: 0, padding: [0, 0, 0, layout.rowInset],
         clip: true })}
         onPress={() => {}}
-        paint={() => ({ ...floatingSurface(), ...accordeeMenuMotion("top"),
+        paint={() => ({ ...floatingSurface(true), ...accordeeMenuMotion("top"),
           transitions: [...accordeeMenuMotion("top").transitions, smoothTransition("height", motion.fast)] })}>
         <Dynamic value={() => rows.value.length > 0} style={{ grow: 1, minHeight: 0 }}>
           {(hasResults) => hasResults ? (

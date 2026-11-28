@@ -14,8 +14,10 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 interprocess = "2.4.4"
 portable-pty = "0.9"
 raw-window-handle = "0.6"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"], optional = true }
 # OpenCode keeps its history in SQLite; `bundled` builds the same engine on Linux and Windows.
@@ -32,7 +34,15 @@ zbus = "5.19"
 
 [target.'cfg(windows)'.dependencies]
 widestring = "1.2"
-windows-sys = { version = "0.61.2", features = ["Win32_Security_Authorization", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security_Authorization",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 windows = { version = "0.62.2", features = [
     "Data_Xml_Dom", "UI_Notifications", "Win32_Storage_EnhancedStorage",
     "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_WinRT",

@@ -449,6 +449,15 @@ pub fn window_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(rgba, width, height).ok()
 }
 
+pub fn tray_icon() -> Option<icy_core::platform::TrayIcon> {
+    let (rgba, [width, height]) = rasterize_svg(ICY_ICON, 32, 1., false)?;
+    Some(icy_core::platform::TrayIcon {
+        width,
+        height,
+        rgba,
+    })
+}
+
 fn cli_svg_bytes(id: &str) -> &'static [u8] {
     match id {
         "claude" => SVG_CLAUDE,

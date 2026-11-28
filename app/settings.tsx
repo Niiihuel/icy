@@ -95,7 +95,7 @@ function SettingsCard(props: {
         style={{ padding: props.flush ? 0 : layout.inset, gap: props.flush ? 0 : layout.inset, clip: true }}
         paint={() => ({
           radius: radii.lg,
-          background: palette().sidebarBg,
+          background: chromeTint(palette().sidebarBg, glassChrome.surfaceAlpha),
           edge: palette().border,
           edgeWidth: spacing.hairline,
         })}
@@ -214,8 +214,8 @@ function SettingsNavItem(props: { page: SettingsPage }): Element {
       }}
       paint={() => ({
         radius: radii.md,
-        background: active() ? palette().sidebarActive : 0,
-        hover: { background: palette().sidebarActive },
+        background: active() ? chromeHighlight(true) : 0,
+        hover: { background: chromeHighlight(active()) },
         transitions: [smoothTransition("background", motion.fast)],
       })}
     >
@@ -258,7 +258,7 @@ function SettingsSidebar(): Element {
           if (keybindRecording.value) stopKeybindRecording();
           activeNav.value = "agents";
         }}
-        paint={() => ({ radius: radii.md, hover: { background: palette().sidebarActive } })}
+        paint={() => ({ radius: radii.md, hover: { background: chromeHighlight() } })}
       >
         <Glyph name="arrow-left" size={15} color={() => palette().textSecondary} hover={() => palette().textPrimary} />
         <Text
@@ -282,7 +282,7 @@ function SettingsSidebar(): Element {
         style={{ height: 32, margin: [0, 0, 8, 0], padding: [0, 6, 0, 10], align: "center", gap: 8, shrink: 0 }}
         paint={() => ({
           radius: radii.md,
-          background: palette().appBg,
+          background: chromeTint(palette().appBg),
           edge: palette().border,
           edgeWidth: spacing.hairline,
         })}
@@ -435,6 +435,15 @@ function AppearanceSettings(): Element {
                 onPress={() => changeTransparency(1)} />
             </Row>
           } />
+        <SettingsRowItem title="Keep running in background"
+          subtitle="Closing the window keeps terminal sessions alive with a system tray icon. Turn off to stop everything on close."
+          control={
+            <ToggleSwitch
+              label="Keep running in background"
+              checked={() => configState.value.keepRunningInBackground}
+              onToggle={() => updateConfig({ keepRunningInBackground: !configState.value.keepRunningInBackground })}
+            />
+          } />
       </SettingsCard>
       <SettingsCard flush title="Themes" description="Load custom JSON themes from the themes folder."
         right={
@@ -457,11 +466,11 @@ function AppearanceSettings(): Element {
                   updateConfig({ theme: theme().id, mode });
                 }}
                 paint={() => ({
-                  background: selected() ? palette().sidebarActive : 0,
+                  background: selected() ? chromeHighlight(true) : 0,
                   edge: palette().border,
                   edgeWidth: themesList.value[0]?.id === theme().id ? 0 : spacing.hairline,
                   edgeSides: [1, 0, 0, 0],
-                  hover: { background: palette().sidebarActive },
+                  hover: { background: chromeHighlight(selected()) },
                   transitions: [smoothTransition("background", motion.fast)],
                 })}
               >
@@ -789,7 +798,12 @@ function SettingsView(): Element {
                 description={() => `Installed icy v${up().currentVersion} · GitHub Releases`}
                 right={
                   <Row style={{ gap: 6 }}>
-                    <SecondaryButton label="Check now" height={26} onPress={checkForUpdates} />
+                    <SecondaryButton
+                      label={() => updateChecking() ? "Checking…" : "Check now"}
+                      height={26}
+                      disabled={() => !updateCheckAvailable()}
+                      onPress={checkForUpdates}
+                    />
                     <SecondaryButton
                       label="Release notes"
                       height={26}
@@ -802,37 +816,45 @@ function SettingsView(): Element {
               >
                 <SettingsRowItem
                   divider={false}
-                  title={() =>
-                    up().hasUpdate
-                      ? `Update v${up().availableVersion} available`
-                      : `Up to date (v${up().currentVersion})`
-                  }
-                  subtitle={() => up().statusText}
+                  title={() => up().hasUpdate ? `Update v${up().availableVersion} available` : "Update status"}
+                  subtitle={updateStatusText}
                   control={
-                    <PrimaryButton
-                      label={() =>
-                        up().stage === "ready"
-                          ? "Install & Restart"
-                          : up().stage === "downloading" || up().stage === "verifying"
-                            ? `${up().progress}%`
-                            : "Download"
-                      }
-                      height={28}
-                      onPress={() => {
-                        if (up().stage === "ready") {
-                          restartConfirmOpen.value = true;
-                        } else {
-                          startUpdateDownload();
-                        }
-                      }}
-                    />
+                    <Show when={() => up().hasUpdate || updateReady()}>
+                      {() => (
+                        <PrimaryButton
+                          label={() =>
+                            updateReady()
+                              ? "Install & Restart"
+                              : updateBusy()
+                                ? `${up().progress}%`
+                                : !up().asset
+                                  ? "View release"
+                                  : updateFailed()
+                                    ? "Retry download"
+                                    : "Download"
+                          }
+                          height={28}
+                          disabled={() => updateBusy() || updateChecking()}
+                          onPress={() => {
+                            if (updateReady()) {
+                              restartConfirmOpen.value = true;
+                            } else if (!up().asset) {
+                              openExternal(up().notes.releaseUrl);
+                            } else {
+                              startUpdateDownload();
+                            }
+                          }}
+                        />
+                      )}
+                    </Show>
                   }
                 />
                 <SettingsRowItem
-                  title="Check for updates on startup"
-                  subtitle="Query GitHub Releases in the background when icy starts."
+                  title="Check for updates automatically"
+                  subtitle="Check on startup and every 4 hours while icy is open."
                   control={
                     <ToggleSwitch
+                      label="Check for updates automatically"
                       checked={() => configState.value.checkUpdates}
                       onToggle={() =>
                         updateConfig({ checkUpdates: !configState.value.checkUpdates })

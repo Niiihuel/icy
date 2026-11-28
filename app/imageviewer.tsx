@@ -109,7 +109,7 @@ function ImageViewerModal(): Element {
             layer: 2200,
           })}
           paint={() => ({
-            background: palette().backdrop,
+            ...modalScrim(),
             starting: { opacity: 0 },
             transitions: [smoothTransition("opacity", motion.base)],
           })}
@@ -135,7 +135,7 @@ function ImageViewerModal(): Element {
             onPress={() => {}}
             paint={() => ({
               radius: radii.xl,
-              background: palette().appBg,
+              background: chromeTint(palette().appBg, glassChrome.surfaceAlpha),
               edge: palette().border,
               edgeWidth: spacing.hairline,
               shadows: [shadows.menu, shadows.menuTight],
